@@ -19,10 +19,12 @@ final class PlayerManager: ObservableObject {
         configureAudioSession()
         configureRemoteCommands()
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
-            Task { @MainActor in self?.tick(time.seconds) }
+            guard let manager = self else { return }
+            Task { @MainActor in manager.tick(time.seconds) }
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.isPlaying = false }
+            guard let manager = self else { return }
+            Task { @MainActor in manager.isPlaying = false }
         }
     }
 
@@ -80,16 +82,38 @@ final class PlayerManager: ObservableObject {
 
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
-        center.playCommand.addTarget { [weak self] _ in Task { @MainActor in self?.play() }; return .success }
-        center.pauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.pause() }; return .success }
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.toggle() }; return .success }
+        center.playCommand.addTarget { [weak self] _ in
+            guard let manager = self else { return .commandFailed }
+            Task { @MainActor in manager.play() }
+            return .success
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            guard let manager = self else { return .commandFailed }
+            Task { @MainActor in manager.pause() }
+            return .success
+        }
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let manager = self else { return .commandFailed }
+            Task { @MainActor in manager.toggle() }
+            return .success
+        }
         center.skipForwardCommand.preferredIntervals = [15]
-        center.skipForwardCommand.addTarget { [weak self] _ in Task { @MainActor in self?.skip(15) }; return .success }
+        center.skipForwardCommand.addTarget { [weak self] _ in
+            guard let manager = self else { return .commandFailed }
+            Task { @MainActor in manager.skip(15) }
+            return .success
+        }
         center.skipBackwardCommand.preferredIntervals = [15]
-        center.skipBackwardCommand.addTarget { [weak self] _ in Task { @MainActor in self?.skip(-15) }; return .success }
+        center.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let manager = self else { return .commandFailed }
+            Task { @MainActor in manager.skip(-15) }
+            return .success
+        }
         center.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            Task { @MainActor in self?.seek(to: event.positionTime) }
+            guard let manager = self else { return .commandFailed }
+            let position = event.positionTime
+            Task { @MainActor in manager.seek(to: position) }
             return .success
         }
     }
@@ -111,4 +135,3 @@ final class PlayerManager: ObservableObject {
         UserDefaults.standard.set(currentTime, forKey: progressKey(episode))
     }
 }
-

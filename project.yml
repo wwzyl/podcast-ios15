@@ -9,7 +9,7 @@ options:
 packages:
   ZIPFoundation:
     url: https://github.com/weichsel/ZIPFoundation.git
-    from: 0.9.19
+    exactVersion: 0.9.20
 targets:
   PodcastIOS15:
     type: application

@@ -17,6 +17,10 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: PodcastIOS15
+        excludes:
+          - Resources/Models
+      - path: PodcastIOS15/Resources/Models/ggml-base-q5_1.bin
+        buildPhase: resources
     dependencies:
       - package: ZIPFoundation
       - framework: Vendor/whisper.xcframework

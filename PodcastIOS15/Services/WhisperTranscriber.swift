@@ -16,13 +16,31 @@ enum WhisperTranscriptionError: LocalizedError {
     }
 }
 
+struct TranscriptionBatch {
+    let segments: [TranscriptSegment]
+    let progress: Double
+}
+
 actor WhisperTranscriber {
     static let shared = WhisperTranscriber()
     private var context: OpaquePointer?
 
     deinit { if let context { whisper_free(context) } }
 
-    func transcribe(episode: Episode, language: String = "auto") async throws -> [TranscriptSegment] {
+    func transcribeStream(audioURL: URL, episode: Episode, language: String = "auto") -> AsyncThrowingStream<TranscriptionBatch, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    try await self.runTranscription(audioURL: audioURL, episode: episode, language: language, continuation: continuation)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func runTranscription(audioURL: URL, episode: Episode, language: String, continuation: AsyncThrowingStream<TranscriptionBatch, Error>.Continuation) async throws {
         let model = try await WhisperModelStore().modelURL()
         if context == nil {
             var options = whisper_context_default_params()
@@ -35,9 +53,59 @@ actor WhisperTranscriber {
             context = whisper_init_from_file_with_params(model.path, options)
         }
         guard let context else { throw WhisperTranscriptionError.modelInitializationFailed }
-        let localAudio = try await downloadAudio(episode.audioURL)
-        let samples = try decodeAudio(localAudio)
-        guard !samples.isEmpty else { throw WhisperTranscriptionError.audioDecodeFailed }
+        let asset = AVURLAsset(url: audioURL)
+        guard let track = asset.tracks(withMediaType: .audio).first else { throw WhisperTranscriptionError.audioDecodeFailed }
+        let duration = asset.duration.seconds
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: settings)
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { throw WhisperTranscriptionError.audioDecodeFailed }
+        reader.add(output)
+        guard reader.startReading() else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
+
+        let samplesPerSecond = 16_000
+        let chunkSize = samplesPerSecond * 30
+        var pending: [Float] = []
+        pending.reserveCapacity(chunkSize + samplesPerSecond)
+        var processedSamples = 0
+        var allSegments: [TranscriptSegment] = []
+
+        while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
+            try Task.checkCancellation()
+            pending.append(contentsOf: samples(from: sampleBuffer))
+            while pending.count >= chunkSize {
+                let chunk = Array(pending.prefix(chunkSize))
+                pending.removeFirst(chunkSize)
+                let baseTime = Double(processedSamples) / Double(samplesPerSecond)
+                let segments = try transcribeChunk(chunk, context: context, language: language, baseTime: baseTime)
+                processedSamples += chunk.count
+                allSegments.append(contentsOf: segments)
+                try? TranscriptCache.save(allSegments, episodeID: episode.id)
+                let progress = duration.isFinite && duration > 0 ? min(1, (baseTime + 30) / duration) : 0
+                continuation.yield(TranscriptionBatch(segments: segments, progress: progress))
+            }
+        }
+        guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
+        if pending.count >= samplesPerSecond {
+            let baseTime = Double(processedSamples) / Double(samplesPerSecond)
+            let segments = try transcribeChunk(pending, context: context, language: language, baseTime: baseTime)
+            allSegments.append(contentsOf: segments)
+            try? TranscriptCache.save(allSegments, episodeID: episode.id)
+            continuation.yield(TranscriptionBatch(segments: segments, progress: 1))
+        }
+        guard !allSegments.isEmpty else { throw WhisperTranscriptionError.transcriptionFailed }
+    }
+
+    private func transcribeChunk(_ samples: [Float], context: OpaquePointer, language: String, baseTime: TimeInterval) throws -> [TranscriptSegment] {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         params.print_realtime = false
         params.print_progress = false
@@ -58,65 +126,31 @@ actor WhisperTranscriber {
         for index in 0..<whisper_full_n_segments(context) {
             let text = String(cString: whisper_full_get_segment_text(context, index)).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
-            let start = Double(whisper_full_get_segment_t0(context, index)) / 100
-            let end = Double(whisper_full_get_segment_t1(context, index)) / 100
+            let start = baseTime + Double(whisper_full_get_segment_t0(context, index)) / 100
+            let end = baseTime + Double(whisper_full_get_segment_t1(context, index)) / 100
             result.append(TranscriptSegment(start: start, end: end, text: text))
         }
-        guard !result.isEmpty else { throw WhisperTranscriptionError.transcriptionFailed }
-        try? TranscriptCache.save(result, episodeID: episode.id)
         return result
     }
 
-    private func downloadAudio(_ remoteURL: URL) async throws -> URL {
-        if remoteURL.isFileURL { return remoteURL }
-        var request = URLRequest(url: remoteURL)
-        request.timeoutInterval = 600
-        request.setValue("PodcastIOS15/1.0", forHTTPHeaderField: "User-Agent")
-        let (temporary, response) = try await URLSession.shared.download(for: request)
-        try validate(response)
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("podcast-\(UUID().uuidString).\(remoteURL.pathExtension.isEmpty ? "m4a" : remoteURL.pathExtension)")
-        try? FileManager.default.removeItem(at: destination)
-        do { try FileManager.default.moveItem(at: temporary, to: destination) }
-        catch { throw WhisperTranscriptionError.audioDownloadFailed }
-        return destination
-    }
-
-    private func decodeAudio(_ url: URL) throws -> [Float] {
-        let asset = AVURLAsset(url: url)
-        guard let track = asset.tracks(withMediaType: .audio).first else { throw WhisperTranscriptionError.audioDecodeFailed }
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false
-        ]
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { throw WhisperTranscriptionError.audioDecodeFailed }
-        reader.add(output)
-        guard reader.startReading() else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
-        var samples: [Float] = []
-        while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
-            guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
-            var length = 0
-            var pointer: UnsafeMutablePointer<Int8>?
-            let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &pointer)
-            guard status == kCMBlockBufferNoErr, let pointer else { continue }
-            let values = UnsafeRawPointer(pointer).bindMemory(to: Int16.self, capacity: length / MemoryLayout<Int16>.size)
-            for index in 0..<(length / MemoryLayout<Int16>.size) { samples.append(Float(Int16(littleEndian: values[index])) / 32768) }
-        }
-        guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
-        return samples
+    private func samples(from sampleBuffer: CMSampleBuffer) -> [Float] {
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return [] }
+        var length = 0
+        var pointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &pointer)
+        guard status == kCMBlockBufferNoErr, let pointer else { return [] }
+        let count = length / MemoryLayout<Int16>.size
+        let values = UnsafeRawPointer(pointer).bindMemory(to: Int16.self, capacity: count)
+        return (0..<count).map { Float(Int16(littleEndian: values[$0])) / 32768 }
     }
 }
 
 private struct WhisperModelStore {
     private let modelURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin?download=true")!
     func modelURL() async throws -> URL {
+        if let bundled = Bundle.main.url(forResource: "ggml-base-q5_1", withExtension: "bin") {
+            return bundled
+        }
         let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("Whisper", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let destination = folder.appendingPathComponent("ggml-base-q5_1.bin")

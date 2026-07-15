@@ -8,6 +8,7 @@ final class PlayerManager: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var playbackStatus: String?
     @Published var rate: Float = 1 { didSet { if isPlaying { player.rate = rate } } }
     @Published var repeatSegment: TranscriptSegment?
 
@@ -33,11 +34,12 @@ final class PlayerManager: ObservableObject {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
     }
 
-    func load(_ episode: Episode, autoPlay: Bool = true) {
+    func load(_ episode: Episode, sourceURL: URL? = nil, autoPlay: Bool = true) {
         if self.episode?.id != episode.id {
             saveProgress()
             self.episode = episode
-            player.replaceCurrentItem(with: AVPlayerItem(url: episode.audioURL))
+            playbackStatus = "正在准备播放…"
+            player.replaceCurrentItem(with: AVPlayerItem(url: sourceURL ?? episode.audioURL))
             let saved = UserDefaults.standard.double(forKey: progressKey(episode))
             if saved > 3 { seek(to: saved) }
             updateNowPlaying()
@@ -51,6 +53,7 @@ final class PlayerManager: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(true)
         player.playImmediately(atRate: rate)
         isPlaying = true
+        playbackStatus = "正在缓冲…"
         updateNowPlaying()
     }
     func pause() {
@@ -71,6 +74,12 @@ final class PlayerManager: ObservableObject {
         guard seconds.isFinite else { return }
         currentTime = seconds
         if let value = player.currentItem?.duration.seconds, value.isFinite { duration = value }
+        switch player.timeControlStatus {
+        case .playing: playbackStatus = nil
+        case .waitingToPlayAtSpecifiedRate: playbackStatus = "正在缓冲…"
+        case .paused: if isPlaying { playbackStatus = "正在准备播放…" }
+        @unknown default: break
+        }
         if let segment = repeatSegment, let end = segment.end, seconds >= end { seek(to: segment.start) }
         if Int(seconds) % 10 == 0 { saveProgress() }
     }

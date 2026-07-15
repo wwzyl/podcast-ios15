@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 struct VocabularyView: View {
     @EnvironmentObject private var store: LibraryStore
@@ -28,7 +29,11 @@ struct VocabularyView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Button { exportCSV() } label: { Label("导出 CSV", systemImage: "tablecells") }
-                    Button { exportAnki() } label: { Label("导出 Anki (.apkg)", systemImage: "square.and.arrow.up") }
+                    Menu {
+                        ForEach(AnkiTemplateType.allCases) { template in
+                            Button(template.title) { exportAnki(template) }
+                        }
+                    } label: { Label("导出 Anki (.apkg)", systemImage: "square.and.arrow.up") }
                 } label: {
                     if exporting { ProgressView() }
                     else { Image(systemName: "ellipsis.circle") }
@@ -47,12 +52,12 @@ struct VocabularyView: View {
         do { exportURL = try VocabularyExporter().csv(store.vocabulary) } catch { errorText = error.localizedDescription }
         exporting = false
     }
-    private func exportAnki() {
+    private func exportAnki(_ template: AnkiTemplateType) {
         exporting = true
         let items = store.vocabulary
         Task.detached {
             do {
-                let url = try VocabularyExporter().apkg(items)
+                let url = try VocabularyExporter().apkg(items, template: template)
                 await MainActor.run { exportURL = url; exporting = false }
             } catch { await MainActor.run { errorText = error.localizedDescription; exporting = false } }
         }
@@ -102,24 +107,40 @@ private struct VocabularyRow: View {
 }
 
 private struct VocabularyDetailView: View {
+    @EnvironmentObject private var store: LibraryStore
     let item: VocabularyItem
     @State private var showDictionary = false
+    @State private var audioPlayer: AVAudioPlayer?
     var body: some View {
         List {
             Section {
                 Text(item.word).font(.largeTitle.bold())
+                if let phonetic = item.phonetic, !phonetic.isEmpty { Text(phonetic).foregroundColor(.secondary) }
                 if !item.translation.isEmpty { Text(item.translation).font(.title3).foregroundColor(AppTheme.purple) }
                 if !item.definition.isEmpty { Text(item.definition) }
                 if item.word != "★ 收藏句子" { Button("打开系统词典") { showDictionary = true } }
             }
             Section("原句") {
-                Text(item.sentence).font(.title3)
+                Button { playOriginalSentence() } label: {
+                    HStack(alignment: .top) {
+                        Text(item.sentence).font(.title3).foregroundColor(.primary)
+                        Spacer()
+                        if store.audioClipURL(for: item) != nil { Image(systemName: "speaker.wave.2.fill").foregroundColor(AppTheme.purple) }
+                    }
+                }.disabled(store.audioClipURL(for: item) == nil)
                 if !item.sentenceTranslation.isEmpty { Text(item.sentenceTranslation).foregroundColor(AppTheme.purple) }
             }
             Section("来源") { Text("\(item.podcastTitle)\n\(item.episodeTitle) · \(item.timestamp.clockString)") }
         }
         .navigationTitle("生词详情").navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showDictionary) { SystemDictionaryHost(term: item.word) }
+    }
+
+    private func playOriginalSentence() {
+        guard let url = store.audioClipURL(for: item) else { return }
+        audioPlayer = try? AVAudioPlayer(contentsOf: url)
+        audioPlayer?.prepareToPlay()
+        audioPlayer?.play()
     }
 }
 

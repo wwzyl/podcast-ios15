@@ -4,6 +4,7 @@ import UIKit
 struct PlayerView: View {
     @EnvironmentObject private var store: LibraryStore
     @EnvironmentObject private var player: PlayerManager
+    @EnvironmentObject private var downloads: EpisodeDownloadManager
     let episode: Episode
     @State private var segments: [TranscriptSegment] = []
     @State private var loadingText = true
@@ -11,6 +12,8 @@ struct PlayerView: View {
     @State private var selectedSegment: TranscriptSegment?
     @State private var translatingAll = false
     @State private var transcribing = false
+    @State private var transcriptionProgress: Double = 0
+    @State private var preparingAudio = false
     @State private var followPlayback = true
 
     private var currentIndex: Int? {
@@ -20,26 +23,30 @@ struct PlayerView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Group {
-                if loadingText { ProgressView("正在载入节目文本…").frame(maxWidth: .infinity, maxHeight: .infinity) }
-                else if segments.isEmpty { noTranscript }
-                else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
-                                SentenceRow(segment: segment, active: index == currentIndex,
-                                            seek: { player.seek(to: segment.start) },
-                                            translate: { translate(index) },
-                                            learn: { selectedSegment = segment },
-                                            favorite: { saveSentence(segment) },
-                                            repeatLine: { player.repeatSegment = player.repeatSegment?.id == segment.id ? nil : segment })
-                                    .id(segment.id)
+            VStack(spacing: 0) {
+                audioStatusBanner
+                Group {
+                    if loadingText { ProgressView("正在载入节目文本…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+                    else if segments.isEmpty { noTranscript }
+                    else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
+                                    SentenceRow(segment: segment, active: index == currentIndex,
+                                                seek: { player.seek(to: segment.start) },
+                                                translate: { translate(index) },
+                                                learn: { selectedSegment = segment },
+                                                favorite: { saveSentence(segment) },
+                                                repeatLine: { player.repeatSegment = player.repeatSegment?.id == segment.id ? nil : segment })
+                                        .id(segment.id)
+                                }
                             }
-                        }.padding(.horizontal, 18).padding(.bottom, 16)
-                    }
-                    .onChange(of: currentIndex) { index in
-                        guard followPlayback, let index, segments.indices.contains(index) else { return }
-                        withAnimation { proxy.scrollTo(segments[index].id, anchor: .center) }
+                            .padding(.horizontal, 18).padding(.bottom, 16)
+                        }
+                        .onChange(of: currentIndex) { index in
+                            guard followPlayback, let index, segments.indices.contains(index) else { return }
+                            withAnimation { proxy.scrollTo(segments[index].id, anchor: .center) }
+                        }
                     }
                 }
             }
@@ -58,7 +65,7 @@ struct PlayerView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { FullPlayerControls() }
         .sheet(item: $selectedSegment) { segment in WordLearningView(episode: episode, segment: segment) }
         .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
-        .onAppear { player.load(episode); if segments.isEmpty { loadTranscript() } }
+        .onAppear { prepareAudio(); if segments.isEmpty { loadTranscript() } }
         .onChange(of: store.importedTranscript) { imported in if let imported { segments = imported; loadingText = false } }
     }
 
@@ -69,12 +76,57 @@ struct PlayerView: View {
             Text("可以使用离线 Whisper 自动生成逐句稿，也可以在“更多”中导入 SRT、VTT 或 Podcasting 2.0 JSON 文稿。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
             if transcribing {
-                ProgressView("首次使用会下载约 60 MB 模型；长节目转写需要一些时间。")
-                    .multilineTextAlignment(.center)
+                VStack(spacing: 8) {
+                    ProgressView(value: transcriptionProgress)
+                    Text("正在逐段转录 \(Int(transcriptionProgress * 100))% · 已完成的文本会立即显示")
+                        .font(.caption).foregroundColor(.secondary)
+                }
             } else {
                 Button("自动生成逐句稿") { transcribeAudio() }.buttonStyle(.borderedProminent)
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var audioStatusBanner: some View {
+        switch downloads.state(for: episode) {
+        case .downloading(let progress, _, _):
+            VStack(alignment: .leading, spacing: 5) {
+                HStack { Text(downloads.state(for: episode).statusText ?? "正在下载音频"); Spacer(); Text("\(Int(progress * 100))%") }
+                    .font(.caption)
+                ProgressView(value: progress)
+            }.padding(.horizontal, 16).padding(.vertical, 9).background(AppTheme.purple.opacity(0.09))
+        case .failed(let message):
+            HStack {
+                Image(systemName: "exclamationmark.triangle")
+                Text(message).font(.caption).lineLimit(2)
+                Spacer()
+                Button("重试") { prepareAudio(retry: true) }
+            }.padding(10).background(Color.orange.opacity(0.12))
+        case .ready:
+            if transcribing {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("正在后台逐段转录 \(Int(transcriptionProgress * 100))%").font(.caption)
+                    ProgressView(value: transcriptionProgress)
+                }.padding(.horizontal, 16).padding(.vertical, 8).background(AppTheme.purple.opacity(0.09))
+            } else if preparingAudio { ProgressView("下载完成，正在准备播放…").font(.caption).padding(9) }
+        case .idle:
+            if preparingAudio { ProgressView("正在连接音频服务器…").font(.caption).padding(9) }
+        }
+    }
+
+    private func prepareAudio(retry: Bool = false) {
+        if player.episode?.id == episode.id { return }
+        preparingAudio = true
+        Task {
+            do {
+                let url = retry ? try await downloads.retry(episode) : try await downloads.download(episode)
+                player.load(episode, sourceURL: url)
+            } catch {
+                errorText = "音频准备失败：\(error.localizedDescription)"
+            }
+            preparingAudio = false
+        }
     }
 
     private func loadTranscript() {
@@ -93,10 +145,18 @@ struct PlayerView: View {
 
     private func transcribeAudio() {
         transcribing = true
+        transcriptionProgress = 0
         loadingText = false
         Task {
-            do { segments = try await WhisperTranscriber.shared.transcribe(episode: episode) }
-            catch { errorText = error.localizedDescription }
+            do {
+                let audioURL = try await downloads.download(episode)
+                let stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
+                segments = []
+                for try await batch in stream {
+                    segments.append(contentsOf: batch.segments)
+                    transcriptionProgress = batch.progress
+                }
+            } catch { errorText = error.localizedDescription }
             transcribing = false
         }
     }
@@ -135,7 +195,19 @@ struct PlayerView: View {
     }
 
     private func saveSentence(_ segment: TranscriptSegment) {
-        store.addVocabulary(VocabularyItem(word: "★ 收藏句子", sentence: segment.text, sentenceTranslation: segment.translation ?? "", podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: segment.start))
+        guard let sourceURL = downloads.localURL(for: episode) else {
+            errorText = "音频尚未下载完成，不能保存原声句子。"
+            return
+        }
+        Task {
+            do {
+                let itemID = UUID()
+                let clip = try await AudioClipStore.create(from: sourceURL, itemID: itemID, start: segment.start, end: segment.end)
+                var translated = segment.translation ?? ""
+                if translated.isEmpty { translated = (try? await MicrosoftTranslator.shared.translate(segment.text, to: store.targetLanguage)) ?? "" }
+                store.addVocabulary(VocabularyItem(id: itemID, word: "★ 收藏句子", sentence: segment.text, sentenceTranslation: translated, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: segment.start, audioClipFilename: clip))
+            } catch { errorText = "收藏原声句子失败：\(error.localizedDescription)" }
+        }
     }
 }
 
@@ -183,6 +255,10 @@ private struct FullPlayerControls: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            if let status = player.playbackStatus {
+                HStack(spacing: 7) { ProgressView(); Text(status) }
+                    .font(.caption).foregroundColor(.secondary)
+            }
             HStack(alignment: .center, spacing: 2) {
                 ForEach(bars.indices, id: \.self) { index in Capsule().fill(index < Int(progress * Double(bars.count)) ? AppTheme.purple : Color.secondary.opacity(0.25)).frame(height: bars[index]) }
             }.frame(height: 30)
@@ -211,6 +287,7 @@ private struct FullPlayerControls: View {
 private struct WordLearningView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var downloads: EpisodeDownloadManager
     let episode: Episode
     let segment: TranscriptSegment
     @State private var word = ""
@@ -224,7 +301,18 @@ private struct WordLearningView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section("当前句子") { Text(segment.text); if let value = segment.translation { Text(value).foregroundColor(AppTheme.purple) } }
+                Section("在原句中选择单词或短语") {
+                    SelectableSentenceView(text: segment.text) { selection in
+                        word = selection
+                        phonetic = ""
+                        definition = ""
+                        translation = ""
+                    }
+                    .frame(minHeight: 92)
+                    Text("长按并拖动选择连续文本，所选单词或短语会自动填入下方。")
+                        .font(.caption).foregroundColor(.secondary)
+                    if let value = segment.translation { Text(value).foregroundColor(AppTheme.purple) }
+                }
                 Section("要查询的单词或短语") {
                     TextField("输入或粘贴单词", text: $word).textInputAutocapitalization(.never).autocorrectionDisabled()
                     HStack {
@@ -241,7 +329,7 @@ private struct WordLearningView: View {
                         if !definition.isEmpty { Text(definition) }
                     }
                 }
-                Section { Button("加入生词库") { save() }.disabled(word.isEmpty) }
+                Section { Button("连同例句加入生词库") { save() }.disabled(word.isEmpty || loading) }
             }
             .navigationTitle("查词").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
@@ -265,8 +353,28 @@ private struct WordLearningView: View {
     }
 
     private func save() {
-        store.addVocabulary(VocabularyItem(word: word.trimmingCharacters(in: .whitespacesAndNewlines), definition: definition, translation: translation, sentence: segment.text, sentenceTranslation: segment.translation ?? "", podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: segment.start))
-        dismiss()
+        loading = true
+        Task {
+            guard let sourceURL = downloads.localURL(for: episode) else {
+                errorText = "整集音频尚未下载完成，暂时无法保存独立原声例句。"
+                loading = false
+                return
+            }
+            var sentenceTranslation = segment.translation ?? ""
+            if sentenceTranslation.isEmpty {
+                sentenceTranslation = (try? await MicrosoftTranslator.shared.translate(segment.text, to: store.targetLanguage)) ?? ""
+            }
+            do {
+                let itemID = UUID()
+                let clip = try await AudioClipStore.create(from: sourceURL, itemID: itemID, start: segment.start, end: segment.end)
+                store.addVocabulary(VocabularyItem(id: itemID, word: word.trimmingCharacters(in: .whitespacesAndNewlines), phonetic: phonetic, definition: definition, translation: translation, sentence: segment.text, sentenceTranslation: sentenceTranslation, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: segment.start, audioClipFilename: clip))
+                loading = false
+                dismiss()
+            } catch {
+                errorText = "保存原声例句失败：\(error.localizedDescription)"
+                loading = false
+            }
+        }
     }
 }
 
@@ -274,4 +382,43 @@ private struct SystemDictionaryView: UIViewControllerRepresentable {
     let term: String
     func makeUIViewController(context: Context) -> UIReferenceLibraryViewController { UIReferenceLibraryViewController(term: term) }
     func updateUIViewController(_ uiViewController: UIReferenceLibraryViewController, context: Context) {}
+}
+
+private struct SelectableSentenceView: UIViewRepresentable {
+    let text: String
+    let onSelection: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onSelection: onSelection) }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.delegate = context.coordinator
+        view.text = text
+        view.font = UIFont.systemFont(ofSize: 20)
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+        view.textContainer.lineFragmentPadding = 0
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if uiView.text != text { uiView.text = text }
+        context.coordinator.onSelection = onSelection
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var onSelection: (String) -> Void
+        init(onSelection: @escaping (String) -> Void) { self.onSelection = onSelection }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            let range = textView.selectedRange
+            guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return }
+            let value = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { onSelection(value) }
+        }
+    }
 }

@@ -72,7 +72,7 @@ private struct AddPodcastView: View {
                     }
                     if loading { ProgressView().frame(maxWidth: .infinity) }
                     ForEach(results) { item in
-                        Button { subscribe(item.feedUrl) } label: {
+                        Button { subscribe(item.feedUrl, artworkURL: URL(string: item.artworkUrl600 ?? "")) } label: {
                             HStack(spacing: 12) {
                                 AsyncImage(url: URL(string: item.artworkUrl600 ?? "")) { image in image.resizable().scaledToFill() } placeholder: { Color.secondary.opacity(0.12) }
                                     .frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 9))
@@ -99,14 +99,13 @@ private struct AddPodcastView: View {
             loading = false
         }
     }
-    private func subscribe(_ value: String) {
+    private func subscribe(_ value: String, artworkURL: URL? = nil) {
         guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
         loading = true
         Task {
-            do { try await store.subscribe(feedURL: url); dismiss() }
+            do { try await store.subscribe(feedURL: url, fallbackArtworkURL: artworkURL); dismiss() }
             catch { errorText = error.localizedDescription }
             loading = false
         }
     }
 }
-

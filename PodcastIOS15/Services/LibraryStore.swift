@@ -29,8 +29,9 @@ final class LibraryStore: ObservableObject {
         vocabulary = load([VocabularyItem].self, name: "vocabulary.json") ?? []
     }
 
-    func subscribe(feedURL: URL) async throws {
-        let podcast = try await RSSService().load(feedURL: feedURL)
+    func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil) async throws {
+        var podcast = try await RSSService().load(feedURL: feedURL)
+        if podcast.artworkURL == nil { podcast.artworkURL = fallbackArtworkURL }
         if let index = podcasts.firstIndex(where: { $0.feedURL == feedURL }) {
             podcasts[index] = podcast
         } else {
@@ -40,7 +41,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func refresh(_ podcast: Podcast) async throws {
-        try await subscribe(feedURL: podcast.feedURL)
+        try await subscribe(feedURL: podcast.feedURL, fallbackArtworkURL: podcast.artworkURL)
     }
 
     func remove(_ podcast: Podcast) {
@@ -50,6 +51,7 @@ final class LibraryStore: ObservableObject {
 
     func addVocabulary(_ item: VocabularyItem) {
         if let index = vocabulary.firstIndex(where: { $0.word.caseInsensitiveCompare(item.word) == .orderedSame && $0.sentence == item.sentence }) {
+            if vocabulary[index].audioClipFilename != item.audioClipFilename { AudioClipStore.remove(vocabulary[index].audioClipFilename) }
             vocabulary[index] = item
         } else {
             vocabulary.insert(item, at: 0)
@@ -58,13 +60,21 @@ final class LibraryStore: ObservableObject {
     }
 
     func removeVocabulary(at offsets: IndexSet) {
+        for index in offsets where vocabulary.indices.contains(index) { AudioClipStore.remove(vocabulary[index].audioClipFilename) }
         vocabulary.remove(atOffsets: offsets)
         saveVocabulary()
     }
 
     func clearVocabulary() {
         vocabulary.removeAll()
+        AudioClipStore.removeAll()
         saveVocabulary()
+    }
+
+    func audioClipURL(for item: VocabularyItem) -> URL? {
+        guard let filename = item.audioClipFilename else { return nil }
+        let url = AudioClipStore.url(for: filename)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     func importFile(_ url: URL) {
@@ -97,4 +107,3 @@ final class LibraryStore: ObservableObject {
         return try? decoder.decode(type, from: data)
     }
 }
-

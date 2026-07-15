@@ -3,8 +3,10 @@ import UniformTypeIdentifiers
 
 struct MoreView: View {
     @EnvironmentObject private var store: LibraryStore
+    @EnvironmentObject private var downloads: EpisodeDownloadManager
     @State private var importing = false
     @State private var showClear = false
+    @State private var showClearCache = false
 
     var body: some View {
         List {
@@ -30,6 +32,19 @@ struct MoreView: View {
                 Label("支持后台与锁屏播放", systemImage: "lock.iphone")
                 Label("支持倍速、15 秒跳转和逐句循环", systemImage: "goforward.15")
             }
+            Section("缓存管理") {
+                Picker("自动删除已听过音频缓存文件", selection: $downloads.cachePolicy) {
+                    ForEach(AudioCachePolicy.allCases) { policy in Text(policy.title).tag(policy) }
+                }
+                HStack {
+                    Label("音频下载缓存文件", systemImage: "internaldrive")
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: downloads.cacheSize, countStyle: .file)).foregroundColor(.secondary)
+                }
+                Button(role: .destructive) { showClearCache = true } label: { Label("删除音频下载缓存", systemImage: "trash") }
+                Text("这里只清理整集音频。转录文本、生词数据和生词的独立原声例句不会被删除。")
+                    .font(.caption).foregroundColor(.secondary)
+            }
             Section("数据") {
                 Button(role: .destructive) { showClear = true } label: { Label("清空生词库", systemImage: "trash") }
             }
@@ -47,5 +62,10 @@ struct MoreView: View {
             Button("清空", role: .destructive) { store.clearVocabulary() }
             Button("取消", role: .cancel) {}
         }
+        .confirmationDialog("确定删除全部整集音频缓存？", isPresented: $showClearCache, titleVisibility: .visible) {
+            Button("删除", role: .destructive) { downloads.clearEpisodeCache() }
+            Button("取消", role: .cancel) {}
+        }
+        .onAppear { downloads.refreshCacheSize() }
     }
 }

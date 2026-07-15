@@ -22,10 +22,20 @@
 - [x] 12. 实现 Aisten 6.3.5 风格三栏首页、逐句播放页、底部波形控制和生词统计页第一版
 - [x] 13. 添加 GitHub Actions 的 XcodeGen、whisper.cpp 准备、iPhone Release 构建和 IPA 打包流程
 - [x] 14. 补齐 App Icon 全套 iPhone/iPad/App Store 尺寸资源
-- [ ] 15. 在 GitHub Actions/macOS 执行首次真实编译，逐项修复 Swift/Xcode 错误
+- [x] 15. 在 GitHub Actions/macOS 执行首次真实编译并成功产出 IPA
 - [ ] 16. 对 APKG 用桌面 Anki 做导入验证
 - [ ] 17. 在 iOS 15.8 真机验证启动、RSS、播放、翻译、转写和导出
 - [ ] 18. 根据真机截图继续细调，达到更接近 6.3.5 的视觉和手势体验
+- [x] 19. 修复迷你播放条位置并支持点击进入完整播放页
+- [x] 20. 实现单集音频下载进度、本地缓存、失败重试和播放准备/缓冲状态
+- [x] 21. 从 6.3.5 资源复用并内置 `ggml-base-q5_1.bin`，取消运行时模型下载
+- [x] 22. 实现每约 30 秒一批的渐进 Whisper 转录、立即展示和增量缓存
+- [x] 23. 补齐 RSS/Apple Podcasts 封面三层兜底
+- [x] 24. 生词/短语保存音标、译义、词典释义、原句、原句翻译、来源和时间点
+- [x] 25. 补齐 Anki 问答题、填空题和输入填空题三种 6.3.5 风格导出入口
+- [x] 26. 按 6.3.5 分离整集缓存与生词原声片段，避免清理播客后丢失例句音频
+- [x] 27. 实现 1周/15天/1个月/不删除的整集音频缓存策略和缓存管理页
+- [x] 28. 将生词原声作为 Anki APKG 媒体和 `[sound:...]` 字段导出
 
 ## 已确认的 6.3.5 功能证据
 
@@ -61,7 +71,16 @@
 - 首个成功产出的 IPA 在 iPhone 7 / iOS 15.8.2 启动时被 dyld 终止：官方 whisper 1.9.1 XCFramework 引用了 iOS 15 Accelerate 中不存在的 `_cblas_sgemm$NEWLAPACK$ILP64`。已停止使用官方预编译框架，改由 Actions 从同版源码构建最低 iOS 15.0 的 arm64 XCFramework，明确关闭 BLAS 和 Accelerate、保留 Metal/CPU，并在打包前用 `nm`/`otool` 自动拒绝任何 `NEWLAPACK`、`ILP64` 或 Accelerate 动态依赖。新增 Actions 缓存避免每次重复编译。
 - 因首次需要从源码编译 whisper，Actions 超时上限由 30 分钟提高到 60 分钟；缓存命中后后续构建不重复编译。
 - 修复版应用版本已提升为 1.0.1 (2)，便于确认手机安装的不是仍含官方 whisper 框架的旧包。
+- 播放与学习交互修订版提升为 1.1.0 (3)。迷你播放条改为各 Tab 内容内的安全区插入，不再遮挡“生词”标签，点击标题/封面可全屏进入播放页。
+- 单集改为显式下载进度 → 本地播放 → 同一文件渐进转录；下载失败可重试，播放器显示准备和缓冲状态。
+- 6.3.5 包内已有的 59,707,625 字节 `ggml-base-q5_1.bin` 已校验后复制为工程资源，App 优先从 Bundle 读取，不再依赖 Hugging Face 网络。
+- RSS 封面新增标准 `<image><url>`、iTunes image、Media thumbnail、Atom logo/icon 和 Apple 搜索结果 fallback。
+- 生词页及 APKG/CSV 字段已扩展为单词/短语、音标、上下文译义、词典释义、原句、原句翻译、节目来源和时间点；APKG 增加问答、Cloze 和输入答案三种模板。
+- 进一步确认 6.3.5 使用 `AutoDeleteManager` 管理整集缓存，并用独立 `AudioClip` 保存生词原声。新 App 已实现同样分层：整集缓存按最后使用时间自动清理，转录文本和 `VocabularyAudioClips` 不受影响；删除对应生词时才删除片段。
+- 缓存管理页已加入 6.3.5 同款 `1周后 / 15天后 / 1个月后 / 不删除` 策略、缓存大小和手动清理。默认 15 天。
+- 从 6.3.5 二进制恢复出官方模型名和核心字段/HTML：`Aisten Word QA_2025-03-11`、`Aisten Word Cloze_2025-11-08`、`Aisten Word Type Cloze_2025-11-08`，以及 Word/WordAudio/Symbol/Sentence1/Audio1/Source1/Translation1/Definition 等字段。APKG 导出器已改用这些结构，并把独立原声片段写入 media 映射。
 - ad-hoc IPA 适合 TrollStore或由侧载工具重新签名；普通未越狱设备仍需合法开发者签名。
+- 1.1.0 (3) 的下载管理、渐进转录、内置模型、独立例句音频和官方风格 Anki 模板代码已完成静态校验，但尚待下一次 GitHub Actions 真实编译与真机验证。
 
 ## 下一步接续入口
 

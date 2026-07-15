@@ -35,6 +35,7 @@ private final class RSSParser: NSObject, XMLParserDelegate {
     private var channelAuthor = ""
     private var channelSummary = ""
     private var channelArtwork = ""
+    private var insideChannelImage = false
     private var parseError: Error?
 
     init(data: Data, feedURL: URL) {
@@ -76,6 +77,7 @@ private final class RSSParser: NSObject, XMLParserDelegate {
             insideItem = true
             currentItem = Item()
         }
+        if !insideItem && key == "image" { insideChannelImage = true }
         if insideItem && (key == "enclosure" || key == "media:content") {
             currentItem.audio = attributeDict["url"] ?? currentItem.audio
         }
@@ -89,6 +91,11 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         if key == "itunes:image" {
             if insideItem { currentItem.artwork = attributeDict["href"] ?? "" }
             else { channelArtwork = attributeDict["href"] ?? "" }
+        }
+        if key == "media:thumbnail" || key == "media:image" {
+            let value = attributeDict["url"] ?? attributeDict["href"] ?? ""
+            if insideItem { currentItem.artwork = value }
+            else if !value.isEmpty { channelArtwork = value }
         }
     }
 
@@ -114,6 +121,9 @@ private final class RSSParser: NSObject, XMLParserDelegate {
             case "title": if channelTitle.isEmpty { channelTitle = text }
             case "itunes:author", "author", "dc:creator": if channelAuthor.isEmpty { channelAuthor = text }
             case "description", "subtitle": if channelSummary.isEmpty { channelSummary = text }
+            case "url": if insideChannelImage && channelArtwork.isEmpty { channelArtwork = text }
+            case "logo", "icon": if channelArtwork.isEmpty { channelArtwork = text }
+            case "image": insideChannelImage = false
             default: break
             }
         }

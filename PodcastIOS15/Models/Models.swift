@@ -5,7 +5,7 @@ struct Podcast: Identifiable, Codable, Hashable {
     let title: String
     let author: String
     let summary: String
-    let artworkURL: URL?
+    var artworkURL: URL?
     let feedURL: URL
     var episodes: [Episode]
 }
@@ -42,6 +42,7 @@ struct TranscriptSegment: Identifiable, Codable, Hashable {
 struct VocabularyItem: Identifiable, Codable, Hashable {
     let id: UUID
     var word: String
+    var phonetic: String?
     var definition: String
     var translation: String
     var sentence: String
@@ -49,11 +50,13 @@ struct VocabularyItem: Identifiable, Codable, Hashable {
     var podcastTitle: String
     var episodeTitle: String
     var timestamp: TimeInterval
+    var audioClipFilename: String?
     var createdAt: Date
 
-    init(id: UUID = UUID(), word: String, definition: String = "", translation: String = "", sentence: String, sentenceTranslation: String = "", podcastTitle: String, episodeTitle: String, timestamp: TimeInterval, createdAt: Date = Date()) {
+    init(id: UUID = UUID(), word: String, phonetic: String? = nil, definition: String = "", translation: String = "", sentence: String, sentenceTranslation: String = "", podcastTitle: String, episodeTitle: String, timestamp: TimeInterval, audioClipFilename: String? = nil, createdAt: Date = Date()) {
         self.id = id
         self.word = word
+        self.phonetic = phonetic
         self.definition = definition
         self.translation = translation
         self.sentence = sentence
@@ -61,6 +64,7 @@ struct VocabularyItem: Identifiable, Codable, Hashable {
         self.podcastTitle = podcastTitle
         self.episodeTitle = episodeTitle
         self.timestamp = timestamp
+        self.audioClipFilename = audioClipFilename
         self.createdAt = createdAt
     }
 }

@@ -77,6 +77,17 @@ jobs:
 
       - name: Package IPA
         run: |
+          MODEL="build/Build/Products/Release-iphoneos/PodcastIOS15.app/ggml-base-q5_1.bin"
+          if [ ! -f "$MODEL" ]; then
+            echo "Bundled Whisper model is missing from the app."
+            exit 1
+          fi
+          MODEL_SIZE=$(stat -f%z "$MODEL")
+          echo "Bundled Whisper model size: $MODEL_SIZE"
+          if [ "$MODEL_SIZE" -lt 50000000 ]; then
+            echo "Bundled Whisper model is incomplete."
+            exit 1
+          fi
           mkdir -p build/Payload
           cp -R build/Build/Products/Release-iphoneos/PodcastIOS15.app build/Payload/
           codesign --force --deep --sign - build/Payload/PodcastIOS15.app

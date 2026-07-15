@@ -4,6 +4,7 @@ import SwiftUI
 struct PodcastIOS15App: App {
     @StateObject private var store = LibraryStore()
     @StateObject private var player = PlayerManager()
+    @StateObject private var downloads = EpisodeDownloadManager()
 
     init() {
         UINavigationBar.appearance().largeTitleTextAttributes = [.font: UIFont.systemFont(ofSize: 34, weight: .bold)]
@@ -15,6 +16,7 @@ struct PodcastIOS15App: App {
             RootView()
                 .environmentObject(store)
                 .environmentObject(player)
+                .environmentObject(downloads)
                 .tint(AppTheme.purple)
                 .onOpenURL { url in store.importFile(url) }
         }
@@ -26,4 +28,3 @@ enum AppTheme {
     static let background = Color(uiColor: .systemGroupedBackground)
     static let secondary = Color(uiColor: .secondaryLabel)
 }
-

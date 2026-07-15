@@ -71,8 +71,19 @@ final class EpisodeDownloadManager: ObservableObject {
 
     func localURL(for episode: Episode) -> URL? {
         let url = destination(for: episode)
-        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 else { return nil }
-        return url
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 { return url }
+
+        // RSS 有时会在刷新后把同一 enclosure 从 mp3 改成无扩展名或 m4a。
+        // 缓存主键仍是稳定的 episode id，因此也复用同一摘要前缀下的旧文件。
+        let prefix = cacheStem(for: episode) + "."
+        let candidates = (try? FileManager.default.contentsOfDirectory(at: audioRoot,
+                                                                       includingPropertiesForKeys: [.fileSizeKey],
+                                                                       options: [.skipsHiddenFiles])) ?? []
+        return candidates.first {
+            guard $0.lastPathComponent.hasPrefix(prefix),
+                  let size = try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return false }
+            return size > 0
+        }
     }
 
     func download(_ episode: Episode) async throws -> URL {
@@ -180,9 +191,12 @@ final class EpisodeDownloadManager: ObservableObject {
     private func updateQueuedCount() { queuedCount = activeTokens.count }
 
     private func destination(for episode: Episode) -> URL {
-        let digest = SHA256.hash(data: Data(episode.id.utf8)).map { String(format: "%02x", $0) }.joined()
         let ext = episode.audioURL.pathExtension.isEmpty ? "m4a" : episode.audioURL.pathExtension
-        return audioRoot.appendingPathComponent("\(digest).\(ext)")
+        return audioRoot.appendingPathComponent("\(cacheStem(for: episode)).\(ext)")
+    }
+
+    private func cacheStem(for episode: Episode) -> String {
+        SHA256.hash(data: Data(episode.id.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     private var audioRoot: URL {
@@ -231,9 +245,13 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     func start(episodeID: String, token: String, remoteURL: URL, destinationURL: URL) {
         var request = URLRequest(url: remoteURL)
         request.timeoutInterval = 60 * 60
-        request.setValue("PodcastIOS15/1.3", forHTTPHeaderField: "User-Agent")
+        request.setValue("PodcastIOS15/1.4.1", forHTTPHeaderField: "User-Agent")
         let task = session.downloadTask(with: request)
-        task.taskDescription = BackgroundDownloadDescriptor(episodeID: episodeID, token: token, destinationPath: destinationURL.path).encoded
+        // 只持久化文件名。App 更新或重新安装后沙盒容器路径可能变化，
+        // 后台 URLSession 恢复旧任务时不能继续使用旧容器的绝对路径。
+        task.taskDescription = BackgroundDownloadDescriptor(episodeID: episodeID,
+                                                            token: token,
+                                                            destinationPath: destinationURL.lastPathComponent).encoded
         task.resume()
     }
 
@@ -266,11 +284,27 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let descriptor = BackgroundDownloadDescriptor.decode(downloadTask.taskDescription) else { return }
-        let destination = URL(fileURLWithPath: descriptor.destinationPath)
+        // 对旧版保存的绝对路径也只取最后一级文件名，再落到当前 App 容器。
+        let filename = URL(fileURLWithPath: descriptor.destinationPath).lastPathComponent
+        guard !filename.isEmpty, filename != ".", filename != ".." else {
+            moveErrors[downloadTask.taskIdentifier] = URLError(.cannotCreateFile)
+            return
+        }
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("EpisodeAudio", isDirectory: true)
+        let destination = root.appendingPathComponent(filename, isDirectory: false)
         do {
-            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.createDirectory(at: root,
+                                                    withIntermediateDirectories: true,
+                                                    attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                                  ofItemAtPath: root.path)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
             try FileManager.default.moveItem(at: location, to: destination)
+            try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                                   ofItemAtPath: destination.path)
             movedURLs[downloadTask.taskIdentifier] = destination
         } catch {
             moveErrors[downloadTask.taskIdentifier] = error

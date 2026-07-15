@@ -66,6 +66,8 @@ private struct AddPodcastView: View {
                         Button { search() } label: { Image(systemName: "magnifyingglass") }.disabled(query.isEmpty || loading)
                     }
                     if loading { ProgressView().frame(maxWidth: .infinity) }
+                }
+                Section(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "中美热门播客" : "搜索结果") {
                     ForEach(results) { item in
                         Button { subscribe(item.feedUrl, artworkURL: URL(string: item.artworkUrl600 ?? "")) } label: {
                             HStack(spacing: 12) {
@@ -83,6 +85,16 @@ private struct AddPodcastView: View {
             .navigationTitle("搜索播客").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
             .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
+            .task { if results.isEmpty && query.isEmpty { loadPopular() } }
+        }
+    }
+
+    private func loadPopular() {
+        loading = true
+        Task {
+            do { results = try await PodcastSearchService().popular() }
+            catch { errorText = "热门播客加载失败：\(error.localizedDescription)" }
+            loading = false
         }
     }
 

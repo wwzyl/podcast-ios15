@@ -24,6 +24,7 @@ struct TranscriptionBatch {
 actor WhisperTranscriber {
     static let shared = WhisperTranscriber()
     private var context: OpaquePointer?
+    private var contextUsesGPU = false
 
     deinit { if let context { whisper_free(context) } }
 
@@ -44,20 +45,14 @@ actor WhisperTranscriber {
     private func runTranscription(audioURL: URL, episode: Episode, language: String, continuation: AsyncThrowingStream<TranscriptionBatch, Error>.Continuation) async throws {
         let model = try await WhisperModelStore().modelURL()
         if context == nil {
-            var options = whisper_context_default_params()
-#if targetEnvironment(simulator)
-            options.use_gpu = false
-#else
-            options.use_gpu = true
-            options.flash_attn = true
-#endif
-            context = whisper_init_from_file_with_params(model.path, options)
+            context = makeContext(model: model, useGPU: true)
+            contextUsesGPU = context != nil
+            if context == nil { context = makeContext(model: model, useGPU: false); contextUsesGPU = false }
         }
-        guard let context else { throw WhisperTranscriptionError.modelInitializationFailed }
+        guard context != nil else { throw WhisperTranscriptionError.modelInitializationFailed }
         let asset = AVURLAsset(url: audioURL)
         guard let track = asset.tracks(withMediaType: .audio).first else { throw WhisperTranscriptionError.audioDecodeFailed }
         let duration = asset.duration.seconds
-        // 只从最后一个已经完整保存的句子之后继续，App 重启后无需从头转录。
         var allSegments = TranscriptCache.load(episodeID: episode.id) ?? []
         let cachedEnd = allSegments.last?.end ?? allSegments.last?.start ?? 0
         let resumeTime = min(max(0, max(cachedEnd, TranscriptCache.resumeTime(episodeID: episode.id) ?? 0)), max(0, duration))
@@ -66,13 +61,9 @@ actor WhisperTranscriber {
             return
         }
         let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false
         ]
         let reader = try AVAssetReader(asset: asset)
         let output = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: settings)
@@ -80,33 +71,26 @@ actor WhisperTranscriber {
         guard reader.canAdd(output) else { throw WhisperTranscriptionError.audioDecodeFailed }
         reader.add(output)
         if resumeTime > 0, duration.isFinite, duration > resumeTime {
-            reader.timeRange = CMTimeRange(start: CMTime(seconds: resumeTime, preferredTimescale: 600),
-                                           end: CMTime(seconds: duration, preferredTimescale: 600))
+            reader.timeRange = CMTimeRange(start: CMTime(seconds: resumeTime, preferredTimescale: 600), end: CMTime(seconds: duration, preferredTimescale: 600))
         }
         guard reader.startReading() else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
 
         let samplesPerSecond = 16_000
-        // 20 秒低延迟窗、5 秒重叠；UI 按完整句提交，不按固定窗粗暴显示。
-        let firstWindowSize = samplesPerSecond * 20
-        let firstStepSize = samplesPerSecond * 15
-        let regularWindowSize = samplesPerSecond * 20
-        let regularStepSize = samplesPerSecond * 15
+        let windowSize = samplesPerSecond * 20
+        let stepSize = samplesPerSecond * 15
         var pending: [Float] = []
-        pending.reserveCapacity(regularWindowSize + samplesPerSecond)
+        pending.reserveCapacity(windowSize + samplesPerSecond)
         var processedSamples = 0
-        var acceptedThrough: TimeInterval = resumeTime
+        var acceptedThrough = resumeTime
         var assembler = SentenceAssembler()
 
         while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
             try Task.checkCancellation()
             pending.append(contentsOf: samples(from: sampleBuffer))
-            var windowSize = processedSamples == 0 ? firstWindowSize : regularWindowSize
-            var stepSize = processedSamples == 0 ? firstStepSize : regularStepSize
             while pending.count >= windowSize {
                 let chunk = Array(pending.prefix(windowSize))
-                try Task.checkCancellation()
                 let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
-                let raw = try transcribeChunk(chunk, context: context, language: language, baseTime: baseTime)
+                let raw = try transcribeChunk(chunk, model: model, language: language, baseTime: baseTime)
                 try Task.checkCancellation()
                 let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
                 let stable = raw.filter {
@@ -115,22 +99,16 @@ actor WhisperTranscriber {
                 }
                 acceptedThrough = boundary
                 let sentences = assembler.consume(stable)
-                if !sentences.isEmpty {
-                    allSegments.append(contentsOf: sentences)
-                    try? TranscriptCache.save(allSegments, episodeID: episode.id)
-                }
+                if !sentences.isEmpty { allSegments.append(contentsOf: sentences); try? TranscriptCache.save(allSegments, episodeID: episode.id) }
                 continuation.yield(TranscriptionBatch(segments: sentences, progress: progress(at: boundary, duration: duration)))
                 pending.removeFirst(stepSize)
                 processedSamples += stepSize
-                windowSize = regularWindowSize
-                stepSize = regularStepSize
             }
         }
         guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
         if pending.count >= samplesPerSecond {
-            try Task.checkCancellation()
             let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
-            let raw = try transcribeChunk(pending, context: context, language: language, baseTime: baseTime)
+            let raw = try transcribeChunk(pending, model: model, language: language, baseTime: baseTime)
             try Task.checkCancellation()
             let remaining = raw.filter {
                 let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
@@ -146,33 +124,50 @@ actor WhisperTranscriber {
         try TranscriptCache.markComplete(episodeID: episode.id)
     }
 
-    private func transcribeChunk(_ samples: [Float], context: OpaquePointer, language: String, baseTime: TimeInterval) throws -> [TranscriptSegment] {
-        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
-        params.print_realtime = false
-        params.print_progress = false
-        params.print_timestamps = false
-        params.print_special = false
-        params.translate = false
-        // iPhone 7 只有两个高性能可用核心；旧算法减去 2 后只剩单线程，是明显慢点。
-        params.n_threads = Int32(max(1, min(4, ProcessInfo.processInfo.activeProcessorCount)))
-        params.no_context = false
-        params.single_segment = false
-        let status: Int32 = language.withCString { code in
-            params.language = code
-            return samples.withUnsafeBufferPointer { buffer in
-                whisper_full(context, params, buffer.baseAddress, Int32(buffer.count))
-            }
+    private func makeContext(model: URL, useGPU: Bool) -> OpaquePointer? {
+        var options = whisper_context_default_params()
+#if targetEnvironment(simulator)
+        options.use_gpu = false
+#else
+        options.use_gpu = useGPU
+        options.flash_attn = useGPU
+#endif
+        return whisper_init_from_file_with_params(model.path, options)
+    }
+
+    private func transcribeChunk(_ samples: [Float], model: URL, language: String, baseTime: TimeInterval) throws -> [TranscriptSegment] {
+        guard var activeContext = context else { throw WhisperTranscriptionError.modelInitializationFailed }
+        var status = runWhisper(samples, context: activeContext, language: language)
+        if status != 0, contextUsesGPU {
+            whisper_free(activeContext)
+            context = makeContext(model: model, useGPU: false)
+            contextUsesGPU = false
+            guard let cpuContext = context else { throw WhisperTranscriptionError.modelInitializationFailed }
+            activeContext = cpuContext
+            status = runWhisper(samples, context: activeContext, language: language)
         }
         guard status == 0 else { throw WhisperTranscriptionError.transcriptionFailed }
         var result: [TranscriptSegment] = []
-        for index in 0..<whisper_full_n_segments(context) {
-            let text = String(cString: whisper_full_get_segment_text(context, index)).trimmingCharacters(in: .whitespacesAndNewlines)
+        for index in 0..<whisper_full_n_segments(activeContext) {
+            let text = String(cString: whisper_full_get_segment_text(activeContext, index)).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
-            let start = baseTime + Double(whisper_full_get_segment_t0(context, index)) / 100
-            let end = baseTime + Double(whisper_full_get_segment_t1(context, index)) / 100
+            let start = baseTime + Double(whisper_full_get_segment_t0(activeContext, index)) / 100
+            let end = baseTime + Double(whisper_full_get_segment_t1(activeContext, index)) / 100
             result.append(TranscriptSegment(start: start, end: end, text: text))
         }
         return result
+    }
+
+    private func runWhisper(_ samples: [Float], context: OpaquePointer, language: String) -> Int32 {
+        var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+        params.print_realtime = false; params.print_progress = false; params.print_timestamps = false; params.print_special = false
+        params.translate = false
+        params.n_threads = Int32(max(1, min(4, ProcessInfo.processInfo.activeProcessorCount)))
+        params.no_context = false; params.single_segment = false
+        return language.withCString { code in
+            params.language = code
+            return samples.withUnsafeBufferPointer { whisper_full(context, params, $0.baseAddress, Int32($0.count)) }
+        }
     }
 
     private func progress(at time: TimeInterval, duration: TimeInterval) -> Double {

@@ -4,7 +4,7 @@
 
 ## 已实现
 
-- Apple Podcasts 搜索、RSS URL 订阅、订阅刷新和节目列表
+- Apple Podcasts 搜索、底层 RSS 刷新和节目列表
 - 网络音频、后台/锁屏播放、进度记忆、倍速、15 秒跳转和逐句循环
 - Podcasting 2.0 transcript、SRT、WebVTT 和常见 JSON 文稿
 - 无文稿节目可使用 whisper.cpp + `ggml-base-q5_1` 在设备上离线、分批生成逐句稿（模型已内置）

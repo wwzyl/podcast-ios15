@@ -27,7 +27,7 @@ struct AudioHomeView: View {
         VStack(spacing: 18) {
             Image(systemName: "waveform.circle.fill").font(.system(size: 72)).foregroundColor(AppTheme.purple)
             Text("开始学习一档播客").font(.title2.bold())
-            Text("搜索播客，或粘贴 RSS 地址订阅。\n带 Podcasting 2.0 文稿的节目可直接逐句学习。")
+            Text("搜索 Apple Podcasts 添加节目。\n带 Podcasting 2.0 文稿的节目可直接逐句学习。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
             Button("添加播客") { showingAdd = true }.buttonStyle(.borderedProminent).controlSize(.large)
         }.padding(28)
@@ -53,7 +53,6 @@ private struct AddPodcastView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: LibraryStore
     @State private var query = ""
-    @State private var feedText = ""
     @State private var results: [PodcastSearchResult] = []
     @State private var loading = false
     @State private var errorText: String?
@@ -61,10 +60,6 @@ private struct AddPodcastView: View {
     var body: some View {
         NavigationView {
             List {
-                Section("RSS 地址") {
-                    TextField("https://example.com/feed.xml", text: $feedText).textInputAutocapitalization(.never).keyboardType(.URL)
-                    Button("订阅 RSS") { subscribe(feedText) }.disabled(URL(string: feedText) == nil || loading)
-                }
                 Section("搜索 Apple Podcasts") {
                     HStack {
                         TextField("播客名称", text: $query).onSubmit(search)
@@ -85,7 +80,7 @@ private struct AddPodcastView: View {
                     }
                 }
             }
-            .navigationTitle("添加播客").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("搜索播客").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
             .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
         }

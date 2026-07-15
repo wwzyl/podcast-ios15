@@ -161,5 +161,19 @@
 - [x] 69. ElevenLabs 失败后保留已完成分片，页面提供“重试 ElevenLabs”和“改用 Whisper”；更多菜单可指定任一引擎从头或从当前播放位置重新转写。
 - [x] 70. Whisper 模型、Core ML 编码器和断点转录流程完整保留，作为无网络或 ElevenLabs 失败时的离线兜底。
 - [x] 71. 版本提升为 1.4.0（7），XcodeGen 会自动把新增转录器纳入 application target。
-- [ ] 72. 等待 GitHub Actions Xcode 15.4 完整编译和 IPA 打包，并在真机验证 ElevenLabs 匿名端点可用性、长节目分片和引擎切换。
+- [x] 72. GitHub Actions `29431124310` 已通过 Xcode 15.4 Release 编译、IPA 打包和 Artifact 上传；产物确认为 1.4.0（7）、最低 iOS 15.0，并包含 Whisper framework、离线模型和 Core ML encoder。
 - [x] 73. 第一次 1.4.0 Actions 已通过工程生成和依赖解析；修复 `SelectableTranscriptText` 中待提交选区变量被同名 `guard let` 遮蔽导致的 Swift 编译错误后重新构建。
+- [ ] 74. 真机验证 ElevenLabs 匿名端点可用性、40 分钟以上节目分片、断点切换引擎、切到生词页继续转录，以及 Anki 五字段与原句音频。
+
+### 1.4.0 构建产物
+
+- 本地 IPA：`D:\codex\aisten\PodcastIOS15-1.4.0-build7\PodcastIOS15-iOS15.ipa`
+- Artifact 备份：`D:\codex\aisten\PodcastIOS15-1.4.0-build7-artifact.zip`
+- IPA SHA-256：`B1A350191380961F04BB59BFE9C794B7E42B4F220E7DE8D915B17EDEF23ED793`
+
+### 完成后再对照官方 6.3.5
+
+- 官方资源文案明确说明本地转录只能在前台执行；本项目的转录任务由根节点持有，切换播放页/生词页不会中断，已经覆盖本轮真机反馈。App 被系统真正挂起时仍受 iOS 15 后台执行时限约束。
+- 当前用户要求的高优先级闭环已具备：自动转录、断点续跑、ElevenLabs/Whisper 切换、文本选择松手提交、播放页扩容、条件显示回到当前播放、上下文释义 Anki、原句音频、热门播客和封面修复。
+- 后续值得借鉴但暂不提高优先级：为 Whisper 加 Silero VAD 降低静音耗时；允许手工修正文稿/译文；按播客设置自动下载规则；章节与 show notes 浏览。
+- 本轮继续不做低优先级外围能力：OPML、iCloud 同步、欧路词典跳转、CarPlay 和视频播放。

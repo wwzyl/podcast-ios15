@@ -153,3 +153,12 @@
 - [x] 64. 移除主界面手动 RSS URL 输入入口：该入口只支持播客 Feed、不能订阅 YouTube 视频；Apple Podcasts 搜索仍在底层使用 RSS 加载和刷新单集。
 - [x] 65. 添加页并行加载 Apple Podcasts 中国区与美国区热门榜单、合并并按 Feed 去重；两边都失败时回退到“英语学习”搜索结果，页面不再空白。
 - [ ] 66. 等待 GitHub Actions Xcode 15.4 完整编译、IPA 打包并在真机验证后台下载恢复、转录续跑和文本选择手势。
+
+## 2026-07-16：1.4.0（7）ElevenLabs 默认转录
+
+- [x] 67. 参考 `scribe2srt` 接入 ElevenLabs Scribe v2：约 40 分钟 M4A 分片、词级时间戳、标点断句、短句合并、指数退避重试和逐批缓存。
+- [x] 68. 无 RSS 文稿时默认自动使用 ElevenLabs，无需在 App 中填写 API Key；转录管理器仍由 App 根节点持有，离开播放页或切到生词页不会取消。
+- [x] 69. ElevenLabs 失败后保留已完成分片，页面提供“重试 ElevenLabs”和“改用 Whisper”；更多菜单可指定任一引擎从头或从当前播放位置重新转写。
+- [x] 70. Whisper 模型、Core ML 编码器和断点转录流程完整保留，作为无网络或 ElevenLabs 失败时的离线兜底。
+- [x] 71. 版本提升为 1.4.0（7），XcodeGen 会自动把新增转录器纳入 application target。
+- [ ] 72. 等待 GitHub Actions Xcode 15.4 完整编译和 IPA 打包，并在真机验证 ElevenLabs 匿名端点可用性、长节目分片和引擎切换。

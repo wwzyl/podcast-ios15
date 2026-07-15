@@ -55,7 +55,7 @@ struct MoreView: View {
                 Button(role: .destructive) { showClear = true } label: { Label("清空生词库", systemImage: "trash") }
             }
             Section("关于") {
-                HStack { Text("版本"); Spacer(); Text("1.3.0 (6) · iOS 15").foregroundColor(.secondary) }
+                HStack { Text("版本"); Spacer(); Text("1.4.0 (7) · iOS 15").foregroundColor(.secondary) }
                 Text("这是面向 iOS 15 重新实现的播客语言学习工具，界面和主要学习流程参考 Aisten 6.3.5；未使用其不兼容的可执行代码。")
                     .font(.caption).foregroundColor(.secondary)
             }

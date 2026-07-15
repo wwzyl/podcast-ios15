@@ -3,7 +3,8 @@ options:
   bundleIdPrefix: com.podcastios15
   deploymentTarget:
     iOS: "15.0"
-  xcodeVersion: "15.0"
+  xcodeVersion: "15.4"
+  minimumXcodeGenVersion: "2.41.0"
   createIntermediateGroups: true
 packages:
   ZIPFoundation:

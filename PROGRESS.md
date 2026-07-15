@@ -56,6 +56,7 @@
 - 已检查并移除 Swift 5.7 可能不支持的 tuple key-path 写法，改为普通闭包，降低首次编译风险。
 - 工程静态校验已通过：17 个 Swift 文件；所有 Assets JSON、Info.plist、`project.yml` 和 GitHub Actions YAML 均可解析；源码扫描未发现 NavigationStack、SwiftData、Charts、TranslationSession 等 iOS 16+ API。
 - Windows 下载依赖产生的残缺 whisper ZIP 已清理，仓库不会误带损坏文件；完整 XCFramework 由 Actions 自动下载。
+- 首次 Actions 在 `resolvePackageDependencies` 前失败：最新版 Homebrew XcodeGen 生成 `objectVersion = 77`，Xcode 15.4 无法读取。已参考 `cbrain ios15` 的旧格式工程，将 XcodeGen 固定为 2.41.0、工程目标版本改为 Xcode 15.4，并增加 `objectVersion <= 60` 自动校验及失败日志 Artifact。该次失败没有进入 Swift 编译阶段。
 - ad-hoc IPA 适合 TrollStore或由侧载工具重新签名；普通未越狱设备仍需合法开发者签名。
 
 ## 下一步接续入口

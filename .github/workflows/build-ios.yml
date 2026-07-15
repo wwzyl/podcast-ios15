@@ -15,20 +15,40 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen 2.41.0
+        run: |
+          curl --fail --location --retry 5 \
+            --output "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/2.41.0/xcodegen.zip"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen-release"
+          chmod +x "$RUNNER_TEMP/xcodegen-release/xcodegen/bin/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen-release/xcodegen/bin" >> "$GITHUB_PATH"
 
       - name: Prepare whisper.cpp for iOS
         run: bash scripts/prepare-whisper.sh
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        run: |
+          xcodegen --version
+          xcodegen generate
+          OBJECT_VERSION=$(sed -n 's/.*objectVersion = \([0-9][0-9]*\);.*/\1/p' PodcastIOS15.xcodeproj/project.pbxproj | head -n 1)
+          echo "Generated Xcode objectVersion=$OBJECT_VERSION"
+          if [ -z "$OBJECT_VERSION" ] || [ "$OBJECT_VERSION" -gt 60 ]; then
+            echo "Project format is newer than Xcode 15.4 can read."
+            exit 1
+          fi
 
       - name: Resolve Swift packages
-        run: xcodebuild -resolvePackageDependencies -project PodcastIOS15.xcodeproj -scheme PodcastIOS15
+        run: |
+          mkdir -p build/logs
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project PodcastIOS15.xcodeproj \
+            -scheme PodcastIOS15 2>&1 | tee build/logs/resolve-packages.log
 
       - name: Build for iPhone
         run: |
+          set -o pipefail
           xcodebuild \
             -project PodcastIOS15.xcodeproj \
             -scheme PodcastIOS15 \
@@ -39,7 +59,15 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
-            build
+            build 2>&1 | tee build/logs/xcodebuild.log
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PodcastIOS15-build-logs
+          path: build/logs/*.log
+          if-no-files-found: ignore
 
       - name: Package IPA
         run: |

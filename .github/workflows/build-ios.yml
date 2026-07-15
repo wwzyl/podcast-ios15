@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +23,12 @@ jobs:
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen-release"
           chmod +x "$RUNNER_TEMP/xcodegen-release/xcodegen/bin/xcodegen"
           echo "$RUNNER_TEMP/xcodegen-release/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Cache iOS 15 whisper framework
+        uses: actions/cache@v4
+        with:
+          path: Vendor/whisper.xcframework
+          key: whisper-cpp-1.9.1-ios15-arm64-no-accelerate-v1
 
       - name: Prepare whisper.cpp for iOS
         run: bash scripts/prepare-whisper.sh

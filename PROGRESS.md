@@ -58,6 +58,9 @@
 - Windows 下载依赖产生的残缺 whisper ZIP 已清理，仓库不会误带损坏文件；完整 XCFramework 由 Actions 自动下载。
 - 首次 Actions 在 `resolvePackageDependencies` 前失败：最新版 Homebrew XcodeGen 生成 `objectVersion = 77`，Xcode 15.4 无法读取。已参考 `cbrain ios15` 的旧格式工程，将 XcodeGen 固定为 2.41.0、工程目标版本改为 Xcode 15.4，并增加 `objectVersion <= 60` 自动校验及失败日志 Artifact。该次失败没有进入 Swift 编译阶段。
 - 第二次 Actions 已成功解析依赖并进入全部 17 个 Swift 文件的 Release 编译。仅发现 `PlayerManager` 两处弱引用 `self` 被并发 Task 再次捕获的错误；已修复这两处，并同步审计/修复锁屏播放、暂停、切换、前后跳转和进度拖动的全部同类回调。ZIPFoundation 已按本次成功解析结果固定为 0.9.20。
+- 首个成功产出的 IPA 在 iPhone 7 / iOS 15.8.2 启动时被 dyld 终止：官方 whisper 1.9.1 XCFramework 引用了 iOS 15 Accelerate 中不存在的 `_cblas_sgemm$NEWLAPACK$ILP64`。已停止使用官方预编译框架，改由 Actions 从同版源码构建最低 iOS 15.0 的 arm64 XCFramework，明确关闭 BLAS 和 Accelerate、保留 Metal/CPU，并在打包前用 `nm`/`otool` 自动拒绝任何 `NEWLAPACK`、`ILP64` 或 Accelerate 动态依赖。新增 Actions 缓存避免每次重复编译。
+- 因首次需要从源码编译 whisper，Actions 超时上限由 30 分钟提高到 60 分钟；缓存命中后后续构建不重复编译。
+- 修复版应用版本已提升为 1.0.1 (2)，便于确认手机安装的不是仍含官方 whisper 框架的旧包。
 - ad-hoc IPA 适合 TrollStore或由侧载工具重新签名；普通未越狱设备仍需合法开发者签名。
 
 ## 下一步接续入口

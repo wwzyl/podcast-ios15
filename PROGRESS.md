@@ -162,3 +162,4 @@
 - [x] 70. Whisper 模型、Core ML 编码器和断点转录流程完整保留，作为无网络或 ElevenLabs 失败时的离线兜底。
 - [x] 71. 版本提升为 1.4.0（7），XcodeGen 会自动把新增转录器纳入 application target。
 - [ ] 72. 等待 GitHub Actions Xcode 15.4 完整编译和 IPA 打包，并在真机验证 ElevenLabs 匿名端点可用性、长节目分片和引擎切换。
+- [x] 73. 第一次 1.4.0 Actions 已通过工程生成和依赖解析；修复 `SelectableTranscriptText` 中待提交选区变量被同名 `guard let` 遮蔽导致的 Swift 编译错误后重新构建。

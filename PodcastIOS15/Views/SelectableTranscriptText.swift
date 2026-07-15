@@ -88,9 +88,9 @@ struct SelectableTranscriptText: UIViewRepresentable {
         func commitSelection(in textView: UITextView) {
             let range = textView.selectedRange
             guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return }
-            guard let pendingValue else { return }
+            guard let pendingSelection = pendingValue else { return }
             let current = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
-            let value = current.isEmpty ? pendingValue : current
+            let value = current.isEmpty ? pendingSelection : current
             guard !value.isEmpty else { return }
             pendingValue = nil
             onSelection(value)

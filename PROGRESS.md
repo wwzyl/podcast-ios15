@@ -183,5 +183,12 @@
 - [x] 75. 定位“未能移动 CFNetworkDownload 临时文件，因为没有访问 EpisodeAudio 的权限”：后台任务描述符持久化了旧 App 沙盒的绝对目标路径，更新/重装后恢复任务会写入已失效容器。
 - [x] 76. 新任务仅保存目标文件名；下载完成时始终从当前 App 的 Application Support 重新生成 `EpisodeAudio` 路径，并兼容仍携带旧绝对路径的已排队任务。
 - [x] 77. `EpisodeAudio` 目录和下载文件使用首次解锁后可访问的文件保护等级，降低锁屏完成后台下载时的落盘失败概率。
-- [ ] 78. 等待 GitHub Actions 编译 1.4.1（8）并在真机重新下载同一集，确认自动 ElevenLabs 转录能够紧接下载启动。
+- [x] 78. GitHub Actions `29432328208` 已通过 Xcode 15.4 Release 编译、IPA 打包和 Artifact 上传；产物确认为 1.4.1（8）、最低 iOS 15.0。
 - [x] 79. 明确整集音频缓存与转录缓存互相独立，转录失败不会删除音频；本地查找增加稳定 episode id 摘要前缀回退，RSS 改变 mp3/m4a/无扩展名写法时仍复用已下载文件。
+- [ ] 80. 真机重新下载同一集，确认音频成功落盘、再次进入不重复下载，并且自动 ElevenLabs 转录能够紧接下载启动。
+
+### 1.4.1 构建产物
+
+- 本地 IPA：`D:\codex\aisten\PodcastIOS15-1.4.1-build8\PodcastIOS15-iOS15.ipa`
+- Artifact 备份：`D:\codex\aisten\PodcastIOS15-1.4.1-build8-artifact.zip`
+- IPA SHA-256：`734F1B16CFC4A79C3DBA761C91810D51857E3B9C0ACE62B1F65A037581A7FADE`

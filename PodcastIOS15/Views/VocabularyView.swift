@@ -1,0 +1,136 @@
+import SwiftUI
+import UIKit
+
+struct VocabularyView: View {
+    @EnvironmentObject private var store: LibraryStore
+    @State private var exportURL: URL?
+    @State private var exporting = false
+    @State private var errorText: String?
+
+    var body: some View {
+        List {
+            Section { VocabularyStats(items: store.vocabulary) }
+            Section {
+                HStack { Label("生词", systemImage: "tray"); Spacer(); Text("\(store.vocabulary.filter { $0.word != "★ 收藏句子" }.count)").foregroundColor(.secondary) }
+                HStack { Label("收藏的句子", systemImage: "bookmark"); Spacer(); Text("\(store.vocabulary.filter { $0.word == "★ 收藏句子" }.count)").foregroundColor(.secondary) }
+            }
+            Section("词汇和句子") {
+                if store.vocabulary.isEmpty {
+                    Text("播放节目时，在句子右侧菜单中选择“查词并加入生词”。").foregroundColor(.secondary)
+                }
+                ForEach(store.vocabulary) { item in NavigationLink(destination: VocabularyDetailView(item: item)) { VocabularyRow(item: item) } }
+                    .onDelete(perform: store.removeVocabulary)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("生词")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    Button { exportCSV() } label: { Label("导出 CSV", systemImage: "tablecells") }
+                    Button { exportAnki() } label: { Label("导出 Anki (.apkg)", systemImage: "square.and.arrow.up") }
+                } label: {
+                    if exporting { ProgressView() }
+                    else { Image(systemName: "ellipsis.circle") }
+                }
+                .disabled(store.vocabulary.isEmpty || exporting)
+            }
+        }
+        .sheet(isPresented: Binding(get: { exportURL != nil }, set: { if !$0 { exportURL = nil } })) {
+            if let exportURL { ShareSheet(activityItems: [exportURL]) }
+        }
+        .alert("导出失败", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
+    }
+
+    private func exportCSV() {
+        exporting = true
+        do { exportURL = try VocabularyExporter().csv(store.vocabulary) } catch { errorText = error.localizedDescription }
+        exporting = false
+    }
+    private func exportAnki() {
+        exporting = true
+        let items = store.vocabulary
+        Task.detached {
+            do {
+                let url = try VocabularyExporter().apkg(items)
+                await MainActor.run { exportURL = url; exporting = false }
+            } catch { await MainActor.run { errorText = error.localizedDescription; exporting = false } }
+        }
+    }
+}
+
+private struct VocabularyStats: View {
+    let items: [VocabularyItem]
+    private var counts: [Int] {
+        let calendar = Calendar.current
+        return (0..<7).reversed().map { offset in
+            let day = calendar.date(byAdding: .day, value: -offset, to: Date())!
+            return items.filter { calendar.isDate($0.createdAt, inSameDayAs: day) }.count
+        }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("本周新增").font(.subheadline).foregroundColor(.secondary)
+            Text("\(counts.reduce(0, +))").font(.system(size: 42, weight: .medium, design: .rounded))
+            HStack(alignment: .bottom, spacing: 10) {
+                ForEach(counts.indices, id: \.self) { index in
+                    VStack {
+                        Spacer(minLength: 0)
+                        RoundedRectangle(cornerRadius: 3).fill(AppTheme.purple).frame(height: max(4, CGFloat(counts[index]) * 9))
+                        Text(shortWeekday(index)).font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+            }.frame(height: 105)
+        }.padding(.vertical, 8)
+    }
+    private func shortWeekday(_ index: Int) -> String {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN"); formatter.dateFormat = "E"
+        let date = Calendar.current.date(byAdding: .day, value: index - 6, to: Date())!
+        return formatter.string(from: date)
+    }
+}
+
+private struct VocabularyRow: View {
+    let item: VocabularyItem
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack { Text(item.word).font(.headline); Spacer(); Text(item.createdAt, style: .date).font(.caption).foregroundColor(.secondary) }
+            if !item.translation.isEmpty { Text(item.translation).foregroundColor(AppTheme.purple) }
+            Text(item.sentence).font(.subheadline).foregroundColor(.secondary).lineLimit(2)
+        }.padding(.vertical, 4)
+    }
+}
+
+private struct VocabularyDetailView: View {
+    let item: VocabularyItem
+    @State private var showDictionary = false
+    var body: some View {
+        List {
+            Section {
+                Text(item.word).font(.largeTitle.bold())
+                if !item.translation.isEmpty { Text(item.translation).font(.title3).foregroundColor(AppTheme.purple) }
+                if !item.definition.isEmpty { Text(item.definition) }
+                if item.word != "★ 收藏句子" { Button("打开系统词典") { showDictionary = true } }
+            }
+            Section("原句") {
+                Text(item.sentence).font(.title3)
+                if !item.sentenceTranslation.isEmpty { Text(item.sentenceTranslation).foregroundColor(AppTheme.purple) }
+            }
+            Section("来源") { Text("\(item.podcastTitle)\n\(item.episodeTitle) · \(item.timestamp.clockString)") }
+        }
+        .navigationTitle("生词详情").navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showDictionary) { SystemDictionaryHost(term: item.word) }
+    }
+}
+
+private struct SystemDictionaryHost: UIViewControllerRepresentable {
+    let term: String
+    func makeUIViewController(context: Context) -> UIReferenceLibraryViewController { UIReferenceLibraryViewController(term: term) }
+    func updateUIViewController(_ uiViewController: UIReferenceLibraryViewController, context: Context) {}
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: activityItems, applicationActivities: nil) }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}

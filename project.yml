@@ -1,0 +1,38 @@
+name: PodcastIOS15
+options:
+  bundleIdPrefix: com.podcastios15
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: 0.9.19
+targets:
+  PodcastIOS15:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: PodcastIOS15
+    dependencies:
+      - package: ZIPFoundation
+      - framework: Vendor/whisper.xcframework
+        embed: true
+      - sdk: AVFoundation.framework
+      - sdk: MediaPlayer.framework
+      - sdk: libsqlite3.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.podcastios15.app
+        PRODUCT_NAME: PodcastIOS15
+        SWIFT_VERSION: 5.7
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        INFOPLIST_FILE: PodcastIOS15/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        OTHER_LDFLAGS: "$(inherited) -lc++"
+    scheme:
+      testTargets: []

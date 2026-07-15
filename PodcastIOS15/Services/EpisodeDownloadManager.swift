@@ -75,15 +75,14 @@ final class EpisodeDownloadManager: ObservableObject {
 
         // RSS 有时会在刷新后把同一 enclosure 从 mp3 改成无扩展名或 m4a。
         // 缓存主键仍是稳定的 episode id，因此也复用同一摘要前缀下的旧文件。
-        let prefix = cacheStem(for: episode) + "."
-        let candidates = (try? FileManager.default.contentsOfDirectory(at: audioRoot,
-                                                                       includingPropertiesForKeys: [.fileSizeKey],
-                                                                       options: [.skipsHiddenFiles])) ?? []
-        return candidates.first {
+        let prefix = episodeAudioFilenamePrefix + cacheStem(for: episode) + "."
+        if let current = cachedAudioURLs.first(where: {
             guard $0.lastPathComponent.hasPrefix(prefix),
                   let size = try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return false }
             return size > 0
-        }
+        }) { return current }
+
+        return nil
     }
 
     func download(_ episode: Episode) async throws -> URL {
@@ -112,6 +111,7 @@ final class EpisodeDownloadManager: ObservableObject {
             coordinator.cancel(episodeID: episode.id, token: oldToken)
         }
         resumeWaiters(for: episode.id, result: .failure(CancellationError()))
+        if let local = localURL(for: episode) { try? FileManager.default.removeItem(at: local) }
         try? FileManager.default.removeItem(at: destination(for: episode))
         states[episode.id] = .idle
         updateQueuedCount()
@@ -121,7 +121,7 @@ final class EpisodeDownloadManager: ObservableObject {
     func cleanupExpired() {
         guard cachePolicy != .never else { refreshCacheSize(); return }
         let cutoff = Date().addingTimeInterval(-Double(cachePolicy.rawValue) * 24 * 60 * 60)
-        let urls = (try? FileManager.default.contentsOfDirectory(at: audioRoot, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+        let urls = cachedAudioURLs
         for url in urls {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             if date < cutoff { try? FileManager.default.removeItem(at: url) }
@@ -134,13 +134,13 @@ final class EpisodeDownloadManager: ObservableObject {
         activeTokens.removeAll()
         for episodeID in Array(waiters.keys) { resumeWaiters(for: episodeID, result: .failure(CancellationError())) }
         states.removeAll()
-        try? FileManager.default.removeItem(at: audioRoot)
+        for url in cachedAudioURLs { try? FileManager.default.removeItem(at: url) }
         cacheSize = 0
         updateQueuedCount()
     }
 
     func refreshCacheSize() {
-        let urls = (try? FileManager.default.contentsOfDirectory(at: audioRoot, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles])) ?? []
+        let urls = cachedAudioURLs
         cacheSize = urls.reduce(0) { result, url in
             result + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
@@ -192,16 +192,23 @@ final class EpisodeDownloadManager: ObservableObject {
 
     private func destination(for episode: Episode) -> URL {
         let ext = episode.audioURL.pathExtension.isEmpty ? "m4a" : episode.audioURL.pathExtension
-        return audioRoot.appendingPathComponent("\(cacheStem(for: episode)).\(ext)")
+        return audioRoot.appendingPathComponent("\(episodeAudioFilenamePrefix)\(cacheStem(for: episode)).\(ext)")
     }
 
     private func cacheStem(for episode: Episode) -> String {
-        SHA256.hash(data: Data(episode.id.utf8)).map { String(format: "%02x", $0) }.joined()
+        episodeAudioDigest(episode.id)
     }
 
     private var audioRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("EpisodeAudio", isDirectory: true)
+        // 不再创建 EpisodeAudio 子目录，直接使用系统保证可写的 Caches 根目录。
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+    }
+
+    private var cachedAudioURLs: [URL] {
+        let values = (try? FileManager.default.contentsOfDirectory(at: audioRoot,
+                                                                  includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+                                                                  options: [.skipsHiddenFiles])) ?? []
+        return values.filter { $0.lastPathComponent.hasPrefix(episodeAudioFilenamePrefix) }
     }
 
     private func markAccess(_ url: URL) {
@@ -232,6 +239,13 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     private var movedURLs: [Int: URL] = [:]
     private var moveErrors: [Int: Error] = [:]
     private var backgroundCompletionHandler: (() -> Void)?
+    private let downloadDelegateQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "PodcastIOS15.AudioDownloadPersistence"
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        return queue
+    }()
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         configuration.sessionSendsLaunchEvents = true
@@ -239,13 +253,13 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
         configuration.allowsCellularAccess = true
         configuration.httpMaximumConnectionsPerHost = 2
         configuration.timeoutIntervalForResource = 60 * 60 * 24
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: downloadDelegateQueue)
     }()
 
     func start(episodeID: String, token: String, remoteURL: URL, destinationURL: URL) {
         var request = URLRequest(url: remoteURL)
         request.timeoutInterval = 60 * 60
-        request.setValue("PodcastIOS15/1.4.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("PodcastIOS15/1.5.0", forHTTPHeaderField: "User-Agent")
         let task = session.downloadTask(with: request)
         // 只持久化文件名。App 更新或重新安装后沙盒容器路径可能变化，
         // 后台 URLSession 恢复旧任务时不能继续使用旧容器的绝对路径。
@@ -284,31 +298,43 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let descriptor = BackgroundDownloadDescriptor.decode(downloadTask.taskDescription) else { return }
-        // 对旧版保存的绝对路径也只取最后一级文件名，再落到当前 App 容器。
-        let filename = URL(fileURLWithPath: descriptor.destinationPath).lastPathComponent
-        guard !filename.isEmpty, filename != ".", filename != ".." else {
-            moveErrors[downloadTask.taskIdentifier] = URLError(.cannotCreateFile)
-            return
-        }
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("EpisodeAudio", isDirectory: true)
+        // 旧任务可能仍保存 Application Support/EpisodeAudio 的绝对路径。
+        // 忽略旧目录，只保留扩展名，并用 episode id 在当前 Caches 根目录生成稳定文件名。
+        let oldFilename = URL(fileURLWithPath: descriptor.destinationPath).lastPathComponent
+        let ext = URL(fileURLWithPath: oldFilename).pathExtension.isEmpty ? "m4a" : URL(fileURLWithPath: oldFilename).pathExtension
+        let filename = "\(episodeAudioFilenamePrefix)\(episodeAudioDigest(descriptor.episodeID)).\(ext)"
+        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         let destination = root.appendingPathComponent(filename, isDirectory: false)
+        let staging = root.appendingPathComponent(".\(filename).\(UUID().uuidString).partial", isDirectory: false)
         do {
-            try FileManager.default.createDirectory(at: root,
-                                                    withIntermediateDirectories: true,
-                                                    attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                                                  ofItemAtPath: root.path)
+            // 不对 CFNetwork 临时文件做跨目录 rename。逐块复制到当前沙盒，
+            // 再在同一个 Caches 目录内原子改名，规避 EpisodeAudio 权限错误。
+            try copyDownloadedFile(from: location, to: staging)
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }
-            try FileManager.default.moveItem(at: location, to: destination)
-            try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                                                   ofItemAtPath: destination.path)
+            try FileManager.default.moveItem(at: staging, to: destination)
             movedURLs[downloadTask.taskIdentifier] = destination
         } catch {
+            try? FileManager.default.removeItem(at: staging)
             moveErrors[downloadTask.taskIdentifier] = error
         }
+    }
+
+    private func copyDownloadedFile(from source: URL, to destination: URL) throws {
+        _ = FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let input = try FileHandle(forReadingFrom: source)
+        let output = try FileHandle(forWritingTo: destination)
+        defer {
+            try? input.close()
+            try? output.close()
+        }
+        while true {
+            let data = try input.read(upToCount: 512 * 1024) ?? Data()
+            if data.isEmpty { break }
+            try output.write(contentsOf: data)
+        }
+        try output.synchronize()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -326,6 +352,12 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
         backgroundCompletionHandler = nil
         handler?()
     }
+}
+
+private let episodeAudioFilenamePrefix = "PodcastEpisodeAudio-"
+
+private func episodeAudioDigest(_ episodeID: String) -> String {
+    SHA256.hash(data: Data(episodeID.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 
 private extension Int64 {

@@ -135,13 +135,8 @@ private struct PlayerContentView: View {
                         Button("整体延后 0.5 秒") { shiftTranscript(by: 0.5) }
                     }
                     Button { translateAll() } label: { Label("翻译全文", systemImage: "character.bubble") }.disabled(translatingAll || segments.isEmpty)
-                    Button { transcribeAudio(engine: .elevenLabs) } label: { Label("用 ElevenLabs 重新转写", systemImage: "waveform.badge.mic") }.disabled(transcription.state(for: episode).isRunning)
-                    Button { transcribeAudio(engine: .whisper) } label: { Label("用 Whisper 重新转写", systemImage: "waveform") }.disabled(transcription.state(for: episode).isRunning)
-                    Menu("从当前位置重新转写") {
-                        Button("使用 ElevenLabs") { retranscribeFromCurrent(engine: .elevenLabs) }
-                        Button("使用 Whisper") { retranscribeFromCurrent(engine: .whisper) }
-                    }
-                    .disabled(transcription.state(for: episode).isRunning)
+                    Button { transcribeAudio() } label: { Label("用 Whisper 重新转写", systemImage: "waveform") }.disabled(transcription.state(for: episode).isRunning)
+                    Button { retranscribeFromCurrent() } label: { Label("从当前位置重新转写", systemImage: "waveform.path.badge.minus") }.disabled(transcription.state(for: episode).isRunning)
                     Divider()
                     Button { player.playPrevious() } label: { Label("播放上一集", systemImage: "backward.end") }
                     Button { player.playNext() } label: { Label("播放下一集", systemImage: "forward.end") }
@@ -185,18 +180,18 @@ private struct PlayerContentView: View {
         VStack(spacing: 15) {
             Image(systemName: "captions.bubble").font(.system(size: 55)).foregroundColor(AppTheme.purple)
             Text("这一集没有附带逐句文本").font(.title3.bold())
-            Text("下载完成后会默认使用 ElevenLabs 自动生成逐句稿；失败时可以从断点重试，或切换到离线 Whisper。")
+            Text("下载完成后会自动使用离线 Whisper 生成逐句稿；失败时可以从最后断点继续。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
             if transcription.state(for: episode).isRunning {
                 VStack(spacing: 8) {
                     ProgressView(value: transcription.state(for: episode).progress)
-                    Text("\(transcription.state(for: episode).engine.title) 正在后台转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
+                    Text("Whisper 正在后台转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
                         .font(.caption).foregroundColor(.secondary)
                 }
             } else if transcription.state(for: episode).errorMessage != nil {
                 EmptyView()
             } else {
-                Button("使用 ElevenLabs 生成逐句稿") { transcribeAudio(engine: .elevenLabs) }.buttonStyle(.borderedProminent)
+                Button("使用 Whisper 生成逐句稿") { transcribeAudio() }.buttonStyle(.borderedProminent)
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -224,18 +219,16 @@ private struct PlayerContentView: View {
         case .ready:
             if transcription.state(for: episode).isRunning {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("\(transcription.state(for: episode).engine.title) 正在后台转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
+                    Text("Whisper 正在后台转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
                     ProgressView(value: transcription.state(for: episode).progress)
                 }.padding(.horizontal, 16).padding(.vertical, 8).background(AppTheme.purple.opacity(0.09))
             } else if let message = transcription.state(for: episode).errorMessage {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("\(transcription.state(for: episode).engine.title) 转录失败：\(message)", systemImage: "exclamationmark.triangle")
+                    Label("Whisper 转录失败：\(message)", systemImage: "exclamationmark.triangle")
                         .font(.caption).fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Button("重试 ElevenLabs") { retryTranscription(engine: .elevenLabs) }
+                        Button("从断点重试 Whisper") { retryTranscription() }
                             .buttonStyle(.borderedProminent)
-                        Button("改用 Whisper") { retryTranscription(engine: .whisper) }
-                            .buttonStyle(.bordered)
                     }
                 }
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -289,22 +282,22 @@ private struct PlayerContentView: View {
         }
     }
 
-    private func transcribeAudio(engine: TranscriptionEngine) {
+    private func transcribeAudio() {
         loadingText = false
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
                 segments = []
-                transcription.restart(episode: episode, audioURL: audioURL, engine: engine)
+                transcription.restart(episode: episode, audioURL: audioURL)
             } catch { errorText = error.localizedDescription }
         }
     }
 
-    private func retryTranscription(engine: TranscriptionEngine) {
+    private func retryTranscription() {
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
-                transcription.retry(episode: episode, audioURL: audioURL, engine: engine)
+                transcription.retry(episode: episode, audioURL: audioURL)
             } catch { errorText = "重试转录失败：\(error.localizedDescription)" }
         }
     }
@@ -318,11 +311,11 @@ private struct PlayerContentView: View {
         }
     }
 
-    private func retranscribeFromCurrent(engine: TranscriptionEngine) {
+    private func retranscribeFromCurrent() {
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
-                transcription.retranscribe(episode: episode, audioURL: audioURL, from: player.currentTime, engine: engine)
+                transcription.retranscribe(episode: episode, audioURL: audioURL, from: player.currentTime)
             } catch { errorText = "重新转录失败：\(error.localizedDescription)" }
         }
     }

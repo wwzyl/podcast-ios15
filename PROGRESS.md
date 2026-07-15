@@ -192,3 +192,12 @@
 - 本地 IPA：`D:\codex\aisten\PodcastIOS15-1.4.1-build8\PodcastIOS15-iOS15.ipa`
 - Artifact 备份：`D:\codex\aisten\PodcastIOS15-1.4.1-build8-artifact.zip`
 - IPA SHA-256：`734F1B16CFC4A79C3DBA761C91810D51857E3B9C0ACE62B1F65A037581A7FADE`
+
+## 2026-07-16：1.5.0（9）恢复 Whisper 与重做音频落盘
+
+- [x] 81. 按真机反馈删除 ElevenLabs 转录器、匿名网络请求、双引擎状态和所有产品界面入口；自动转录、断点续跑、从当前位置重录统一恢复为离线 Whisper。
+- [x] 82. 不再使用 `Application Support/EpisodeAudio` 子目录；音频改存为系统 Caches 根目录中的 `PodcastEpisodeAudio-*` 文件，彻底绕开持续出现权限错误的目录。
+- [x] 83. 下载完成后不再跨沙盒 `moveItem` CFNetwork 临时文件；改为 512 KB 分块读取并写入当前 Caches 的临时文件，再在同一目录内原子改名。
+- [x] 84. 恢复旧后台任务时忽略其中保存的绝对路径，只用 episode id 和扩展名生成当前容器文件名；运行时完全不再读取、写入或清理旧 `EpisodeAudio` 目录。
+- [x] 85. 音频与转录继续独立缓存；Whisper 失败不删除整集音频，已成功落盘的同一 episode 再次打开不会重新下载。
+- [ ] 86. 立即推送 GitHub Actions 构建 1.5.0（9），下载并校验新版 IPA。

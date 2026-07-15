@@ -7,6 +7,9 @@ struct VocabularyView: View {
     @State private var exportURL: URL?
     @State private var exporting = false
     @State private var errorText: String?
+    @State private var showAnkiExport = false
+    @State private var deckName = "Podcast iOS15"
+    @State private var ankiTemplate: AnkiTemplateType = .questionAnswer
 
     var body: some View {
         List {
@@ -29,11 +32,7 @@ struct VocabularyView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Button { exportCSV() } label: { Label("导出 CSV", systemImage: "tablecells") }
-                    Menu {
-                        ForEach(AnkiTemplateType.allCases) { template in
-                            Button(template.title) { exportAnki(template) }
-                        }
-                    } label: { Label("导出 Anki (.apkg)", systemImage: "square.and.arrow.up") }
+                    Button { showAnkiExport = true } label: { Label("导出 Anki (.apkg)", systemImage: "square.and.arrow.up") }
                 } label: {
                     if exporting { ProgressView() }
                     else { Image(systemName: "ellipsis.circle") }
@@ -44,6 +43,32 @@ struct VocabularyView: View {
         .sheet(isPresented: Binding(get: { exportURL != nil }, set: { if !$0 { exportURL = nil } })) {
             if let exportURL { ShareSheet(activityItems: [exportURL]) }
         }
+        .sheet(isPresented: $showAnkiExport) {
+            NavigationView {
+                Form {
+                    Section("牌组") {
+                        TextField("牌组名称", text: $deckName)
+                    }
+                    Section("卡片模板") {
+                        Picker("模板", selection: $ankiTemplate) {
+                            ForEach(AnkiTemplateType.allCases) { template in Text(template.title).tag(template) }
+                        }.pickerStyle(.inline)
+                    }
+                    Section {
+                        Text("同一牌组再次导入时使用稳定的卡片标识；Anki 会保留已有卡片的学习进度，并加入新的生词卡。")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .navigationTitle("导出到 Anki").navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("取消") { showAnkiExport = false } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("导出") { showAnkiExport = false; exportAnki(ankiTemplate, deckName: deckName) }
+                            .disabled(deckName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }.navigationViewStyle(.stack)
+        }
         .alert("导出失败", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
     }
 
@@ -52,12 +77,12 @@ struct VocabularyView: View {
         do { exportURL = try VocabularyExporter().csv(store.vocabulary) } catch { errorText = error.localizedDescription }
         exporting = false
     }
-    private func exportAnki(_ template: AnkiTemplateType) {
+    private func exportAnki(_ template: AnkiTemplateType, deckName: String) {
         exporting = true
         let items = store.vocabulary
         Task.detached {
             do {
-                let url = try VocabularyExporter().apkg(items, template: template)
+                let url = try VocabularyExporter().apkg(items, template: template, deckName: deckName)
                 await MainActor.run { exportURL = url; exporting = false }
             } catch { await MainActor.run { errorText = error.localizedDescription; exporting = false } }
         }
@@ -101,6 +126,7 @@ private struct VocabularyRow: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack { Text(item.word).font(.headline); Spacer(); Text(item.createdAt, style: .date).font(.caption).foregroundColor(.secondary) }
             if !item.translation.isEmpty { Text(item.translation).foregroundColor(AppTheme.purple) }
+            if let rank = item.frequencyRank { Text("COCA #\(rank)").font(.caption).foregroundColor(.secondary) }
             Text(item.sentence).font(.subheadline).foregroundColor(.secondary).lineLimit(2)
         }.padding(.vertical, 4)
     }
@@ -117,6 +143,7 @@ private struct VocabularyDetailView: View {
                 Text(item.word).font(.largeTitle.bold())
                 if let phonetic = item.phonetic, !phonetic.isEmpty { Text(phonetic).foregroundColor(.secondary) }
                 if !item.translation.isEmpty { Text(item.translation).font(.title3).foregroundColor(AppTheme.purple) }
+                if let rank = item.frequencyRank { Label("COCA 词频排名 #\(rank)", systemImage: "chart.bar.fill").foregroundColor(.secondary) }
                 if !item.definition.isEmpty { Text(item.definition) }
                 if item.word != "★ 收藏句子" { Button("打开系统词典") { showDictionary = true } }
             }

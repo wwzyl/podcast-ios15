@@ -51,9 +51,10 @@ struct VocabularyItem: Identifiable, Codable, Hashable {
     var episodeTitle: String
     var timestamp: TimeInterval
     var audioClipFilename: String?
+    var frequencyRank: Int?
     var createdAt: Date
 
-    init(id: UUID = UUID(), word: String, phonetic: String? = nil, definition: String = "", translation: String = "", sentence: String, sentenceTranslation: String = "", podcastTitle: String, episodeTitle: String, timestamp: TimeInterval, audioClipFilename: String? = nil, createdAt: Date = Date()) {
+    init(id: UUID = UUID(), word: String, phonetic: String? = nil, definition: String = "", translation: String = "", sentence: String, sentenceTranslation: String = "", podcastTitle: String, episodeTitle: String, timestamp: TimeInterval, audioClipFilename: String? = nil, frequencyRank: Int? = nil, createdAt: Date = Date()) {
         self.id = id
         self.word = word
         self.phonetic = phonetic
@@ -65,6 +66,7 @@ struct VocabularyItem: Identifiable, Codable, Hashable {
         self.episodeTitle = episodeTitle
         self.timestamp = timestamp
         self.audioClipFilename = audioClipFilename
+        self.frequencyRank = frequencyRank
         self.createdAt = createdAt
     }
 }

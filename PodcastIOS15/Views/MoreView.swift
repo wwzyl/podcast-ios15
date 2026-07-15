@@ -25,8 +25,9 @@ struct MoreView: View {
                 }
                 HStack(alignment: .top) {
                     Image(systemName: "character.bubble")
-                    Text("使用 Microsoft Edge Translator。翻译单句时会同时提交前后文，不调用 iOS 16 Translation 框架。")
+                    Text("整句翻译使用 Microsoft Edge Translator；所选词的语境义可在下方启用与官方相同思路的 GPT 上下文释义。")
                 }.font(.caption).foregroundColor(.secondary)
+                NavigationLink("上下文释义服务") { ContextDefinitionSettingsView() }
             }
             Section("播放") {
                 Label("支持后台与锁屏播放", systemImage: "lock.iphone")
@@ -49,7 +50,7 @@ struct MoreView: View {
                 Button(role: .destructive) { showClear = true } label: { Label("清空生词库", systemImage: "trash") }
             }
             Section("关于") {
-                HStack { Text("版本"); Spacer(); Text("1.0.0 (iOS 15)").foregroundColor(.secondary) }
+                HStack { Text("版本"); Spacer(); Text("1.2.0 (iOS 15)").foregroundColor(.secondary) }
                 Text("这是面向 iOS 15 重新实现的播客语言学习工具，界面和主要学习流程参考 Aisten 6.3.5；未使用其不兼容的可执行代码。")
                     .font(.caption).foregroundColor(.secondary)
             }
@@ -67,5 +68,29 @@ struct MoreView: View {
             Button("取消", role: .cancel) {}
         }
         .onAppear { downloads.refreshCacheSize() }
+    }
+}
+
+private struct ContextDefinitionSettingsView: View {
+    @EnvironmentObject private var store: LibraryStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("使用 GPT 上下文释义", isOn: $store.contextGPTEnabled)
+            } footer: {
+                Text("官方 6.3.5 也包含 GPT 开关、API Key、Base URL 和模型设置。未启用时使用官方词典释义与微软翻译做本地语境匹配。")
+            }
+            Section("OpenAI 兼容接口") {
+                TextField("Base URL", text: $store.contextGPTBaseURL)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                SecureField("API Key", text: $store.contextGPTAPIKey)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("模型", text: $store.contextGPTModel)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+            }
+        }
+        .navigationTitle("上下文释义")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

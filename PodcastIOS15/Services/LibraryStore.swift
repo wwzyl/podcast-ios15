@@ -10,6 +10,10 @@ final class LibraryStore: ObservableObject {
     @Published var targetLanguage = "zh-Hans" {
         didSet { UserDefaults.standard.set(targetLanguage, forKey: "targetLanguage") }
     }
+    @Published var contextGPTEnabled = false { didSet { UserDefaults.standard.set(contextGPTEnabled, forKey: "contextGPTEnabled") } }
+    @Published var contextGPTBaseURL = "https://api.openai.com/v1" { didSet { UserDefaults.standard.set(contextGPTBaseURL, forKey: "contextGPTBaseURL") } }
+    @Published var contextGPTAPIKey = "" { didSet { UserDefaults.standard.set(contextGPTAPIKey, forKey: "contextGPTAPIKey") } }
+    @Published var contextGPTModel = "gpt-4o-mini" { didSet { UserDefaults.standard.set(contextGPTModel, forKey: "contextGPTModel") } }
 
     private let decoder: JSONDecoder = {
         let value = JSONDecoder()
@@ -25,6 +29,10 @@ final class LibraryStore: ObservableObject {
 
     init() {
         targetLanguage = UserDefaults.standard.string(forKey: "targetLanguage") ?? "zh-Hans"
+        contextGPTEnabled = UserDefaults.standard.bool(forKey: "contextGPTEnabled")
+        contextGPTBaseURL = UserDefaults.standard.string(forKey: "contextGPTBaseURL") ?? "https://api.openai.com/v1"
+        contextGPTAPIKey = UserDefaults.standard.string(forKey: "contextGPTAPIKey") ?? ""
+        contextGPTModel = UserDefaults.standard.string(forKey: "contextGPTModel") ?? "gpt-4o-mini"
         podcasts = load([Podcast].self, name: "podcasts.json") ?? []
         vocabulary = load([VocabularyItem].self, name: "vocabulary.json") ?? []
     }

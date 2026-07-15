@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Vendor/whisper.xcframework
-          key: whisper-cpp-1.9.1-ios15-arm64-no-accelerate-v1
+          key: whisper-cpp-1.9.1-ios15-arm64-coreml-metal-v1
 
       - name: Prepare whisper.cpp for iOS
         run: bash scripts/prepare-whisper.sh
@@ -86,6 +86,16 @@ jobs:
           echo "Bundled Whisper model size: $MODEL_SIZE"
           if [ "$MODEL_SIZE" -lt 50000000 ]; then
             echo "Bundled Whisper model is incomplete."
+            exit 1
+          fi
+          COREML="build/Build/Products/Release-iphoneos/PodcastIOS15.app/ggml-base-q5_1-encoder.mlmodelc"
+          if [ ! -d "$COREML" ] || [ ! -f "$COREML/weights/weight.bin" ]; then
+            echo "Bundled Core ML Whisper encoder is missing."
+            exit 1
+          fi
+          WORDS="build/Build/Products/Release-iphoneos/PodcastIOS15.app/words.sqlite"
+          if [ ! -f "$WORDS" ]; then
+            echo "Bundled COCA frequency database is missing."
             exit 1
           fi
           mkdir -p build/Payload

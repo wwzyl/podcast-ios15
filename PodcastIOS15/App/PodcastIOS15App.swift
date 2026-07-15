@@ -5,6 +5,7 @@ struct PodcastIOS15App: App {
     @StateObject private var store = LibraryStore()
     @StateObject private var player = PlayerManager()
     @StateObject private var downloads = EpisodeDownloadManager()
+    @StateObject private var transcription = TranscriptionManager()
 
     init() {
         UINavigationBar.appearance().largeTitleTextAttributes = [.font: UIFont.systemFont(ofSize: 34, weight: .bold)]
@@ -17,6 +18,7 @@ struct PodcastIOS15App: App {
                 .environmentObject(store)
                 .environmentObject(player)
                 .environmentObject(downloads)
+                .environmentObject(transcription)
                 .tint(AppTheme.purple)
                 .onOpenURL { url in store.importFile(url) }
         }

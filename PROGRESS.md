@@ -89,6 +89,31 @@
 3. 用桌面 Anki 验证导出的 `.apkg`。
 4. 安装到 iOS 15.8 真机测试，并根据崩溃日志/截图继续调整。
 
+## 2026-07-15：1.2.0（4）本轮进度
+
+- [x] 29. 将转录任务提升到 App 根节点持有；退出播放页后任务继续运行，回到页面自动接收进度和已完成句子。
+- [x] 30. 无 RSS 文稿时，在整集音频下载完成后自动启动 Whisper，不再要求手动点击。
+- [x] 31. Whisper 改为 20 秒低延迟分析窗 + 5 秒重叠上下文；显示节奏由完整句决定而非固定 30 秒批次，并跨窗口合并碎片。
+- [x] 32. 修复 iPhone 7 被错误限制为单线程的问题；加入官方包中的 41,259,059 字节 Core ML encoder，并继续保留 Metal 与 iOS 15 安全回退。
+- [x] 33. 播放页正文支持直接长按单词、拖动选择词组并打开上下文释义面板；保留右侧菜单作为备用入口。
+- [x] 34. 上下文释义明确区分“所选词在这里的意思”和“完整例句翻译”；收藏时分字段保存两者、原句和独立原声。
+- [x] 35. 主英文释义切换为 6.3.5 使用的 `fda.josscii.top` 接口并保留上游回退；增加官方同类 GPT Base URL/API Key/模型配置。
+- [x] 36. 提取并内置官方 `words.sqlite` 的 COCA 60,023 词频表；释义面板、生词详情、CSV 和 APKG 保存/显示词频排名。
+- [x] 37. Anki 导出增加牌组名称输入、稳定 model/deck/note/card ID 和稳定 GUID；重复导入用于保留既有调度进度并新增卡片，生成后校验 notes/cards 数量。
+- [x] 38. 移除播放控制区波状图，只保留进度条并压缩控制区高度，给逐句文本留出更多空间。
+- [x] 39. 增加“回到当前播放”浮动按钮，点击立即滚到当前句并恢复自动跟随。
+- [x] 40. 版本提升为 1.2.0（4）；Plist、XcodeGen YAML、Actions YAML、资源哈希和 `git diff --check` 已完成静态检查。
+- [ ] 41. 等待 GitHub Actions/Xcode 15.4 对本轮 23 个 Swift 文件做真实编译；如失败，以完整 `xcodebuild.log` 一次性修复。
+- [ ] 42. 真机验证 Core ML 转录速度、完整句时间轴、离开页面继续转录、直接长按、词频与自动转录。
+- [ ] 43. 用 AnkiDesktop/AnkiMobile 实际导入 1.2.0 APKG，确认指定牌组可见、第二次只新增卡片且旧卡学习进度不变。
+
+### 本轮官方 6.3.5 新证据
+
+- 包内 `words.sqlite` 只有 `COCA60000(RANK, PoS, word)` 表和 60,023 条词频数据，不是中英释义库。
+- `dictionary-block.json` 证明官方词典页支持有道、Longman、Bing、Cambridge、Oxford、Collins、Merriam-Webster 等来源；二进制还直接包含 `https://fda.josscii.top/api/v2/entries/en/`。
+- 二进制包含 `gptAPIKey`、`gptBaseURL`、`gptModel`、`enableGPT`、`useContextDefinition` 与 `WordAIExplainView`，说明高质量“语境中的词义”可走用户配置的 GPT 链路，而非普通整句机器翻译。
+- 包内同时有 `ggml-base-encoder.mlmodelc`、Silero 256ms VAD 和 streaming 左右上下文参数；官方并非固定 30 秒无重叠硬切。
+
 ## 关键文件
 
 - `project.yml`：工程配置和 iOS 15 Deployment Target

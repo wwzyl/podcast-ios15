@@ -21,11 +21,14 @@ targets:
           - Resources/Models
       - path: PodcastIOS15/Resources/Models/ggml-base-q5_1.bin
         buildPhase: resources
+      - path: PodcastIOS15/Resources/Models/ggml-base-q5_1-encoder.mlmodelc
+        buildPhase: resources
     dependencies:
       - package: ZIPFoundation
       - framework: Vendor/whisper.xcframework
         embed: true
       - sdk: AVFoundation.framework
+      - sdk: CoreML.framework
       - sdk: MediaPlayer.framework
       - sdk: libsqlite3.tbd
     settings:

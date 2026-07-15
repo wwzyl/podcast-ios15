@@ -23,6 +23,10 @@ audit_framework() {
     echo "whisper unexpectedly links Accelerate.framework"
     exit 1
   fi
+  if ! otool -L "$binary" | grep -q 'CoreML.framework'; then
+    echo "whisper Core ML acceleration is missing"
+    exit 1
+  fi
   xcrun vtool -show-build "$binary"
 }
 
@@ -45,7 +49,7 @@ git clone --quiet --depth 1 --branch "v$VERSION" \
   https://github.com/ggml-org/whisper.cpp.git "$TMP/whisper.cpp"
 cd "$TMP/whisper.cpp"
 
-echo "Building whisper.cpp for arm64 iOS $MIN_IOS without Accelerate/BLAS"
+echo "Building whisper.cpp for arm64 iOS $MIN_IOS with Core ML + Metal"
 cmake -S . -B build-ios-device -G Xcode \
   -DCMAKE_SYSTEM_NAME=iOS \
   -DCMAKE_OSX_SYSROOT=iphoneos \
@@ -58,7 +62,8 @@ cmake -S . -B build-ios-device -G Xcode \
   -DWHISPER_BUILD_EXAMPLES=OFF \
   -DWHISPER_BUILD_TESTS=OFF \
   -DWHISPER_BUILD_SERVER=OFF \
-  -DWHISPER_COREML=OFF \
+  -DWHISPER_COREML=ON \
+  -DWHISPER_COREML_ALLOW_FALLBACK=ON \
   -DGGML_NATIVE=OFF \
   -DGGML_OPENMP=OFF \
   -DGGML_ACCELERATE=OFF \
@@ -73,6 +78,7 @@ cmake --build build-ios-device --config Release --target whisper -- -quiet
 RELEASE_DIR="Release-iphoneos"
 LIBRARIES=(
   "build-ios-device/src/$RELEASE_DIR/libwhisper.a"
+  "build-ios-device/src/$RELEASE_DIR/libwhisper.coreml.a"
   "build-ios-device/ggml/src/$RELEASE_DIR/libggml.a"
   "build-ios-device/ggml/src/$RELEASE_DIR/libggml-base.a"
   "build-ios-device/ggml/src/$RELEASE_DIR/libggml-cpu.a"
@@ -98,6 +104,7 @@ xcrun --sdk iphoneos clang++ -dynamiclib \
   -Wl,-force_load,"$TMP/combined.a" \
   -framework Foundation \
   -framework Metal \
+  -framework CoreML \
   -install_name '@rpath/whisper.framework/whisper' \
   -o "$FRAMEWORK/whisper"
 
@@ -122,6 +129,7 @@ framework module whisper {
     header "gguf.h"
     link "c++"
     link framework "Metal"
+    link framework "CoreML"
     link framework "Foundation"
     export *
 }

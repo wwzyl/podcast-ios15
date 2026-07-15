@@ -32,14 +32,14 @@ enum AnkiTemplateType: String, CaseIterable, Identifiable {
 struct VocabularyExporter {
     func csv(_ items: [VocabularyItem]) throws -> URL {
         let url = temporaryURL("PodcastIOS15_Vocabulary.csv")
-        let header = ["Word", "Phonetic", "Translation", "Definition", "Sentence", "Sentence Translation", "Podcast", "Episode", "Timestamp"]
-        let rows = items.map { [$0.word, $0.phonetic ?? "", $0.translation, $0.definition, $0.sentence, $0.sentenceTranslation, $0.podcastTitle, $0.episodeTitle, $0.timestamp.clockString] }
+        let header = ["Word", "Phonetic", "Translation", "Definition", "Sentence", "Sentence Translation", "Podcast", "Episode", "Timestamp", "COCA Rank"]
+        let rows = items.map { [$0.word, $0.phonetic ?? "", $0.translation, $0.definition, $0.sentence, $0.sentenceTranslation, $0.podcastTitle, $0.episodeTitle, $0.timestamp.clockString, $0.frequencyRank.map { String($0) } ?? ""] }
         let text = ([header] + rows).map { $0.map(csvField).joined(separator: ",") }.joined(separator: "\r\n")
         try ("\u{FEFF}" + text).write(to: url, atomically: true, encoding: .utf8)
         return url
     }
 
-    func apkg(_ items: [VocabularyItem], template: AnkiTemplateType = .questionAnswer) throws -> URL {
+    func apkg(_ items: [VocabularyItem], template: AnkiTemplateType = .questionAnswer, deckName: String) throws -> URL {
         let fileManager = FileManager.default
         let folder = fileManager.temporaryDirectory.appendingPathComponent("PodcastIOS15-Anki-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -58,7 +58,8 @@ struct VocabularyExporter {
             audioFields[item.id] = "[sound:\(mediaName)]"
         }
         try JSONSerialization.data(withJSONObject: mediaMap, options: [.sortedKeys]).write(to: mediaURL)
-        try createDatabase(at: databaseURL, items: items, templateType: template, audioFields: audioFields)
+        let normalizedDeckName = deckName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Podcast iOS15" : deckName.trimmingCharacters(in: .whitespacesAndNewlines)
+        try createDatabase(at: databaseURL, items: items, templateType: template, deckName: normalizedDeckName, audioFields: audioFields)
         let archiveURL = temporaryURL("PodcastIOS15_\(template.title).apkg")
         try? fileManager.removeItem(at: archiveURL)
         let archive: Archive
@@ -72,7 +73,7 @@ struct VocabularyExporter {
         return archiveURL
     }
 
-    private func createDatabase(at url: URL, items: [VocabularyItem], templateType: AnkiTemplateType, audioFields: [UUID: String]) throws {
+    private func createDatabase(at url: URL, items: [VocabularyItem], templateType: AnkiTemplateType, deckName: String, audioFields: [UUID: String]) throws {
         var database: OpaquePointer?
         guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else { throw ExportError.cannotCreateDatabase }
         defer { sqlite3_close(database) }
@@ -87,41 +88,49 @@ struct VocabularyExporter {
         """)
 
         let now = Int64(Date().timeIntervalSince1970)
-        let modelID = now * 1000
-        let deckID = modelID + 1
+        let modelID = stableID("model|\(officialModelName(for: templateType))")
+        let deckID = stableID("deck|\(deckName.lowercased())")
         let cardFormats = formats(for: templateType)
-        let template: [String: Any] = ["name": templateType.title, "ord": 0, "qfmt": cardFormats.question, "afmt": cardFormats.answer, "bqfmt": "", "bafmt": "", "did": NSNull()]
-        let fieldNames = ["Word", "WordAudio", "Symbol", "Sentence1", "Audio1", "Source1", "Translation1", "Definition", "SentenceCloze", "Backlink"]
+        let template: [String: Any] = ["name": templateType.title, "ord": 0, "qfmt": cardFormats.question, "afmt": cardFormats.answer, "bqfmt": "", "bafmt": "", "bfont": "", "bsize": 0, "did": NSNull()]
+        let fieldNames = ["Word", "WordAudio", "Symbol", "Sentence1", "Audio1", "Source1", "Translation1", "Definition", "SentenceCloze", "Backlink", "FrequencyRank"]
         let fields: [[String: Any]] = fieldNames.enumerated().map {
             ["name": $0.element, "ord": $0.offset, "sticky": false, "rtl": false, "font": "Arial", "size": 20, "media": []]
         }
         let model: [String: Any] = [
-            "id": modelID, "name": officialModelName(for: templateType), "type": templateType == .questionAnswer ? 0 : 1, "mod": now, "usn": -1, "sortf": 0, "did": deckID,
+            "id": String(modelID), "name": officialModelName(for: templateType), "type": templateType == .questionAnswer ? 0 : 1, "mod": now, "usn": -1, "sortf": 0, "did": deckID,
             "tmpls": [template],
             "flds": fields,
             "css": ".card{font-family:-apple-system,Arial;font-size:20px;text-align:left;color:#222;background:#fff}.word{font-size:32px;font-weight:700;color:#5856d6}.phonetic{color:#777;margin:4px 0 16px}.sentence{font-size:22px;margin:12px 0}.translation{font-size:24px;color:#5856d6;margin:12px 0}.context,.source{color:#777;margin-top:10px}.source{font-size:13px}.cloze{font-weight:700;color:#5856d6}",
-            "latexPre": "", "latexPost": "", "latexsvg": false, "req": [[0, "all", [templateType == .questionAnswer ? 0 : 8]]], "vers": []
+            "latexPre": "", "latexPost": "", "latexsvg": false, "req": [[0, "all", [templateType == .questionAnswer ? 0 : 8]]], "tags": [], "vers": []
         ]
-        let deck: [String: Any] = ["id": deckID, "name": "Podcast iOS15", "mod": now, "usn": -1, "desc": "从 Podcast iOS15 生词库导出", "dyn": 0, "collapsed": false, "browserCollapsed": false, "extendNew": 0, "extendRev": 0, "conf": 1]
+        let today = [0, 0]
+        let deck: [String: Any] = ["id": deckID, "name": deckName, "mod": now, "usn": -1, "desc": "从 Podcast iOS15 生词库导出", "dyn": 0, "collapsed": false, "browserCollapsed": false, "extendNew": 0, "extendRev": 50, "conf": 1, "newToday": today, "revToday": today, "lrnToday": today, "timeToday": today]
+        let defaultDeck: [String: Any] = ["id": 1, "name": "Default", "mod": now, "usn": 0, "desc": "", "dyn": 0, "collapsed": false, "browserCollapsed": false, "extendNew": 10, "extendRev": 50, "conf": 1, "newToday": today, "revToday": today, "lrnToday": today, "timeToday": today]
         let config: [String: Any] = ["nextPos": items.count + 1, "estTimes": true, "activeDecks": [deckID], "sortType": "noteFld", "timeLim": 0, "sortBackwards": false, "addToCur": true, "curDeck": deckID, "newBury": true, "newSpread": 0, "dueCounts": true, "curModel": modelID, "collapseTime": 1200]
         let deckConfig: [String: Any] = ["1": ["id": 1, "name": "Default", "mod": 0, "usn": 0, "maxTaken": 60, "autoplay": true, "timer": 0, "replayq": true, "new": ["bury": false, "delays": [1, 10], "initialFactor": 2500, "ints": [1, 4], "order": 1, "perDay": 20], "rev": ["bury": false, "ease4": 1.3, "fuzz": 0.05, "ivlFct": 1, "maxIvl": 36500, "perDay": 200, "hardFactor": 1.2], "lapse": ["delays": [10], "leechAction": 0, "leechFails": 8, "minInt": 1, "mult": 0]]]
         let modelsJSON = try json([String(modelID): model])
-        let decksJSON = try json([String(deckID): deck])
+        let decksJSON = try json(["1": defaultDeck, String(deckID): deck])
         let confJSON = try json(config)
         let dconfJSON = try json(deckConfig)
-        try execute(database, "INSERT INTO col VALUES (1,\(now),\(now),\(now),11,0,0,0,'\(sql(confJSON))','\(sql(modelsJSON))','\(sql(decksJSON))','\(sql(dconfJSON))','{}');")
+        let collectionCreated = Int64(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
+        try execute(database, "INSERT INTO col VALUES (1,\(collectionCreated),\(now * 1000),\(now * 1000),11,0,0,0,'\(sql(confJSON))','\(sql(modelsJSON))','\(sql(decksJSON))','\(sql(dconfJSON))','{}');")
 
-        for (index, item) in items.enumerated() {
-            let noteID = now * 1000 + Int64(index * 2 + 10)
-            let cardID = noteID + 1
+        for item in items {
+            let fingerprint = "\(templateType.rawValue)|\(noteFingerprint(item))"
+            let noteID = stableID("note|\(fingerprint)")
+            let cardID = stableID("card|\(templateType.rawValue)|\(fingerprint)")
             let cloze = clozeSentence(for: item, type: templateType)
             let source = "\(item.podcastTitle) — \(item.episodeTitle) [\(item.timestamp.clockString)]"
             let backlink = "podcastios15://episode/\(item.id.uuidString)"
-            let noteFields = [item.word, "", item.phonetic ?? "", item.sentence, audioFields[item.id] ?? "", source, item.sentenceTranslation.isEmpty ? item.translation : item.sentenceTranslation, item.definition, cloze, backlink]
+            let noteFields = [item.word, "", item.phonetic ?? "", item.sentence, audioFields[item.id] ?? "", source, item.sentenceTranslation.isEmpty ? item.translation : item.sentenceTranslation, item.definition, cloze, backlink, item.frequencyRank.map { String($0) } ?? ""]
             let fields = noteFields.map(htmlPreservingAnkiMarkup).joined(separator: "\u{1f}")
             let checksum = sha1Checksum(item.word)
-            try execute(database, "INSERT INTO notes VALUES (\(noteID),'\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))',\(modelID),\(now),-1,' ','\(sql(fields))','\(sql(item.word))',\(checksum),0,'');")
-            try execute(database, "INSERT INTO cards VALUES (\(cardID),\(noteID),\(deckID),0,\(now),-1,0,0,\(index + 1),0,0,0,0,0,0,0,0,'');")
+            try execute(database, "INSERT INTO notes VALUES (\(noteID),'\(stableGUID(fingerprint))',\(modelID),\(now),-1,' ','\(sql(fields))','\(sql(item.word))',\(checksum),0,'');")
+            try execute(database, "INSERT INTO cards VALUES (\(cardID),\(noteID),\(deckID),0,\(now),-1,0,0,0,0,0,0,0,0,0,0,0,'');")
+        }
+        guard scalar(database, "SELECT COUNT(*) FROM notes") == items.count,
+              scalar(database, "SELECT COUNT(*) FROM cards") == items.count else {
+            throw ExportError.sqlite("生成后卡片数量校验失败")
         }
     }
 
@@ -174,6 +183,36 @@ struct VocabularyExporter {
     private func sha1Checksum(_ value: String) -> UInt32 {
         let digest = Insecure.SHA1.hash(data: Data(value.utf8))
         return digest.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+    private func noteFingerprint(_ item: VocabularyItem) -> String {
+        [item.word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines),
+         item.sentence.trimmingCharacters(in: .whitespacesAndNewlines),
+         item.episodeTitle,
+         String(Int(item.timestamp * 10))].joined(separator: "|")
+    }
+    private func stableID(_ value: String) -> Int64 {
+        let digest = SHA256.hash(data: Data(value.utf8))
+        let raw = digest.prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        // 保持在 Anki 通常使用的 13 位毫秒 ID 范围内，同时由内容稳定派生。
+        return Int64(1_000_000_000_000 + raw % 8_000_000_000_000)
+    }
+    private func stableGUID(_ value: String) -> String {
+        let alphabet = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&()*+,-./:;<=>?@[]^_`{|}~")
+        let digest = SHA256.hash(data: Data(value.utf8))
+        var number = digest.prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        guard number > 0 else { return "a" }
+        var characters: [Character] = []
+        while number > 0 {
+            characters.append(alphabet[Int(number % UInt64(alphabet.count))])
+            number /= UInt64(alphabet.count)
+        }
+        return String(characters.reversed())
+    }
+    private func scalar(_ database: OpaquePointer, _ query: String) -> Int {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK, let statement else { return -1 }
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_step(statement) == SQLITE_ROW ? Int(sqlite3_column_int(statement, 0)) : -1
     }
     private func csvField(_ value: String) -> String { "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
     private func temporaryURL(_ name: String) -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(name) }

@@ -1,3 +1,4 @@
 *.bin binary
 *.png binary
-
+*.sqlite binary
+*.mil binary

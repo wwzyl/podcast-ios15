@@ -5,14 +5,13 @@ struct PlayerView: View {
     @EnvironmentObject private var store: LibraryStore
     @EnvironmentObject private var player: PlayerManager
     @EnvironmentObject private var downloads: EpisodeDownloadManager
+    @EnvironmentObject private var transcription: TranscriptionManager
     let episode: Episode
     @State private var segments: [TranscriptSegment] = []
     @State private var loadingText = true
     @State private var errorText: String?
-    @State private var selectedSegment: TranscriptSegment?
+    @State private var lookupRequest: WordLookupRequest?
     @State private var translatingAll = false
-    @State private var transcribing = false
-    @State private var transcriptionProgress: Double = 0
     @State private var preparingAudio = false
     @State private var followPlayback = true
 
@@ -35,13 +34,32 @@ struct PlayerView: View {
                                     SentenceRow(segment: segment, active: index == currentIndex,
                                                 seek: { player.seek(to: segment.start) },
                                                 translate: { translate(index) },
-                                                learn: { selectedSegment = segment },
+                                                learn: { selected in
+                                                    lookupRequest = WordLookupRequest(segment: segment,
+                                                                                      selectedText: selected,
+                                                                                      previous: index > 0 ? segments[index - 1].text : nil,
+                                                                                      next: index + 1 < segments.count ? segments[index + 1].text : nil)
+                                                },
                                                 favorite: { saveSentence(segment) },
                                                 repeatLine: { player.repeatSegment = player.repeatSegment?.id == segment.id ? nil : segment })
                                         .id(segment.id)
                                 }
                             }
                             .padding(.horizontal, 18).padding(.bottom, 16)
+                        }
+                        .overlay(alignment: .bottomTrailing) {
+                            Button {
+                                followPlayback = true
+                                if let index = currentIndex, segments.indices.contains(index) {
+                                    withAnimation { proxy.scrollTo(segments[index].id, anchor: .center) }
+                                }
+                            } label: {
+                                Label("回到当前播放", systemImage: "location.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 12).padding(.vertical, 9)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            .padding(14)
                         }
                         .onChange(of: currentIndex) { index in
                             guard followPlayback, let index, segments.indices.contains(index) else { return }
@@ -57,15 +75,22 @@ struct PlayerView: View {
                 Menu {
                     Button { followPlayback.toggle() } label: { Label(followPlayback ? "停止跟随文本" : "跟随播放位置", systemImage: followPlayback ? "location.fill" : "location") }
                     Button { translateAll() } label: { Label("翻译全文", systemImage: "character.bubble") }.disabled(translatingAll || segments.isEmpty)
-                    Button { transcribeAudio() } label: { Label("用 Whisper 重新转写", systemImage: "waveform.badge.mic") }.disabled(transcribing)
+                    Button { transcribeAudio() } label: { Label("用 Whisper 重新转写", systemImage: "waveform.badge.mic") }.disabled(transcription.state(for: episode).isRunning)
                     Button { store.importedTranscript = nil; loadTranscript() } label: { Label("重新载入文本", systemImage: "arrow.clockwise") }
                 } label: { if translatingAll { ProgressView() } else { Image(systemName: "ellipsis.circle") } }
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { FullPlayerControls() }
-        .sheet(item: $selectedSegment) { segment in WordLearningView(episode: episode, segment: segment) }
+        .sheet(item: $lookupRequest) { request in
+            WordLearningView(episode: episode, request: request)
+        }
         .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
         .onAppear { prepareAudio(); if segments.isEmpty { loadTranscript() } }
+        .onReceive(transcription.$jobs) { jobs in
+            guard let state = jobs[episode.id] else { return }
+            if !state.segments.isEmpty { segments = state.segments; loadingText = false }
+            if let message = state.errorMessage { errorText = "转录失败：\(message)" }
+        }
         .onChange(of: store.importedTranscript) { imported in if let imported { segments = imported; loadingText = false } }
     }
 
@@ -75,10 +100,10 @@ struct PlayerView: View {
             Text("这一集没有附带逐句文本").font(.title3.bold())
             Text("可以使用离线 Whisper 自动生成逐句稿，也可以在“更多”中导入 SRT、VTT 或 Podcasting 2.0 JSON 文稿。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
-            if transcribing {
+            if transcription.state(for: episode).isRunning {
                 VStack(spacing: 8) {
-                    ProgressView(value: transcriptionProgress)
-                    Text("正在逐段转录 \(Int(transcriptionProgress * 100))% · 已完成的文本会立即显示")
+                    ProgressView(value: transcription.state(for: episode).progress)
+                    Text("正在后台提前转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
                         .font(.caption).foregroundColor(.secondary)
                 }
             } else {
@@ -104,10 +129,10 @@ struct PlayerView: View {
                 Button("重试") { prepareAudio(retry: true) }
             }.padding(10).background(Color.orange.opacity(0.12))
         case .ready:
-            if transcribing {
+            if transcription.state(for: episode).isRunning {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("正在后台逐段转录 \(Int(transcriptionProgress * 100))%").font(.caption)
-                    ProgressView(value: transcriptionProgress)
+                    Text("正在后台提前转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
+                    ProgressView(value: transcription.state(for: episode).progress)
                 }.padding(.horizontal, 16).padding(.vertical, 8).background(AppTheme.purple.opacity(0.09))
             } else if preparingAudio { ProgressView("下载完成，正在准备播放…").font(.caption).padding(9) }
         case .idle:
@@ -132,32 +157,35 @@ struct PlayerView: View {
     private func loadTranscript() {
         loadingText = true
         Task {
-            if let local = store.importedTranscript ?? TranscriptCache.load(episodeID: episode.id) {
+            if let local = store.importedTranscript ?? TranscriptCache.load(episodeID: episode.id), !local.isEmpty {
                 segments = local
+                if !TranscriptCache.isComplete(episodeID: episode.id) { startAutomaticTranscription() }
             } else {
                 do { segments = try await TranscriptService().load(for: episode) }
-                catch TranscriptError.empty { segments = [] }
-                catch { segments = []; errorText = error.localizedDescription }
+                catch TranscriptError.empty { segments = []; startAutomaticTranscription() }
+                catch { segments = []; errorText = error.localizedDescription; startAutomaticTranscription() }
             }
             loadingText = false
         }
     }
 
     private func transcribeAudio() {
-        transcribing = true
-        transcriptionProgress = 0
         loadingText = false
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
-                let stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
                 segments = []
-                for try await batch in stream {
-                    segments.append(contentsOf: batch.segments)
-                    transcriptionProgress = batch.progress
-                }
+                transcription.retry(episode: episode, audioURL: audioURL)
             } catch { errorText = error.localizedDescription }
-            transcribing = false
+        }
+    }
+
+    private func startAutomaticTranscription() {
+        Task {
+            do {
+                let audioURL = try await downloads.download(episode)
+                transcription.start(episode: episode, audioURL: audioURL)
+            } catch { errorText = "自动转录准备失败：\(error.localizedDescription)" }
         }
     }
 
@@ -216,7 +244,7 @@ private struct SentenceRow: View {
     let active: Bool
     let seek: () -> Void
     let translate: () -> Void
-    let learn: () -> Void
+    let learn: (String) -> Void
     let favorite: () -> Void
     let repeatLine: () -> Void
 
@@ -226,18 +254,14 @@ private struct SentenceRow: View {
                 Button(segment.start.clockString, action: seek).font(.subheadline).foregroundColor(active ? AppTheme.purple : .secondary)
                 Spacer()
                 Menu {
-                    Button(action: translate) { Label("结合上下文翻译", systemImage: "character.bubble") }
-                    Button(action: learn) { Label("查词并加入生词", systemImage: "text.magnifyingglass") }
+                    Button(action: translate) { Label("翻译这句话", systemImage: "character.bubble") }
+                    Button { learn("") } label: { Label("查词并加入生词", systemImage: "text.magnifyingglass") }
                     Button(action: favorite) { Label("收藏句子", systemImage: "bookmark") }
                     Button(action: repeatLine) { Label("循环这一句", systemImage: "repeat.1") }
                     Button(action: seek) { Label("从这里播放", systemImage: "play") }
                 } label: { Image(systemName: "ellipsis").foregroundColor(.secondary).frame(width: 34, height: 28) }
             }
-            Text(segment.text)
-                .font(.system(size: 21, weight: active ? .medium : .regular, design: .serif))
-                .foregroundColor(active ? .primary : .primary.opacity(0.9))
-                .fixedSize(horizontal: false, vertical: true)
-                .onTapGesture(perform: seek)
+            SelectableTranscriptText(text: segment.text, active: active, onTap: seek, onSelection: learn)
             if let translation = segment.translation, !translation.isEmpty {
                 Text(translation).font(.system(size: 16)).foregroundColor(AppTheme.purple).fixedSize(horizontal: false, vertical: true)
             }
@@ -251,17 +275,13 @@ private struct SentenceRow: View {
 
 private struct FullPlayerControls: View {
     @EnvironmentObject private var player: PlayerManager
-    private let bars: [CGFloat] = [9,18,12,26,17,22,10,28,16,20,12,25,18,11,22,14,27,12,19,24,11,18,28,15,21,10,25,18,13,22]
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 5) {
             if let status = player.playbackStatus {
                 HStack(spacing: 7) { ProgressView(); Text(status) }
                     .font(.caption).foregroundColor(.secondary)
             }
-            HStack(alignment: .center, spacing: 2) {
-                ForEach(bars.indices, id: \.self) { index in Capsule().fill(index < Int(progress * Double(bars.count)) ? AppTheme.purple : Color.secondary.opacity(0.25)).frame(height: bars[index]) }
-            }.frame(height: 30)
             Slider(value: Binding(get: { player.currentTime }, set: { player.seek(to: $0) }), in: 0...max(player.duration, 1))
             HStack { Text(player.currentTime.clockString); Spacer(); Text("−" + max(0, player.duration - player.currentTime).clockString) }
                 .font(.caption.monospacedDigit()).foregroundColor(.secondary)
@@ -277,11 +297,17 @@ private struct FullPlayerControls: View {
                 Button { player.repeatSegment = nil } label: { Image(systemName: player.repeatSegment == nil ? "repeat" : "repeat.1").frame(width: 48) }.foregroundColor(player.repeatSegment == nil ? .secondary : AppTheme.purple)
             }.font(.title2).foregroundColor(AppTheme.purple)
         }
-        .padding(.horizontal, 18).padding(.top, 9).padding(.bottom, 8)
+        .padding(.horizontal, 18).padding(.top, 5).padding(.bottom, 5)
         .background(.ultraThinMaterial).overlay(alignment: .top) { Divider() }
     }
+}
 
-    private var progress: Double { player.duration > 0 ? min(1, player.currentTime / player.duration) : 0 }
+private struct WordLookupRequest: Identifiable {
+    let id = UUID()
+    let segment: TranscriptSegment
+    let selectedText: String
+    let previous: String?
+    let next: String?
 }
 
 private struct WordLearningView: View {
@@ -289,64 +315,141 @@ private struct WordLearningView: View {
     @EnvironmentObject private var store: LibraryStore
     @EnvironmentObject private var downloads: EpisodeDownloadManager
     let episode: Episode
-    let segment: TranscriptSegment
+    let request: WordLookupRequest
     @State private var word = ""
     @State private var phonetic = ""
     @State private var definition = ""
     @State private var translation = ""
+    @State private var sentenceTranslation = ""
+    @State private var frequency: WordFrequency?
     @State private var loading = false
     @State private var showSystemDictionary = false
     @State private var errorText: String?
 
+    init(episode: Episode, request: WordLookupRequest) {
+        self.episode = episode
+        self.request = request
+        _word = State(initialValue: request.selectedText)
+        _sentenceTranslation = State(initialValue: request.segment.translation ?? "")
+    }
+
     var body: some View {
         NavigationView {
-            Form {
-                Section("在原句中选择单词或短语") {
-                    SelectableSentenceView(text: segment.text) { selection in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Text("原句").font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                        SelectableSentenceView(text: request.segment.text) { selection in
                         word = selection
                         phonetic = ""
                         definition = ""
                         translation = ""
+                        frequency = nil
                     }
-                    .frame(minHeight: 92)
-                    Text("长按并拖动选择连续文本，所选单词或短语会自动填入下方。")
+                    .frame(minHeight: 80)
+                    Text("长按单词或拖动选择词组；播放页也可以直接长按。")
                         .font(.caption).foregroundColor(.secondary)
-                    if let value = segment.translation { Text(value).foregroundColor(AppTheme.purple) }
-                }
-                Section("要查询的单词或短语") {
+                    if !sentenceTranslation.isEmpty {
+                        Divider()
+                        Text(sentenceTranslation).foregroundColor(AppTheme.purple)
+                    }
+                    }
+                    .padding(16).background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+
+                    VStack(alignment: .leading, spacing: 12) {
+                    Text("所选单词或词组").font(.caption.weight(.semibold)).foregroundColor(.secondary)
                     TextField("输入或粘贴单词", text: $word).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    HStack {
-                        Button("查询词义") { lookup() }.disabled(word.isEmpty || loading)
-                        Spacer()
-                        Button("系统词典") { showSystemDictionary = true }.disabled(word.isEmpty)
+                        .font(.title2.weight(.semibold))
+                    Button { lookup() } label: {
+                        HStack { Spacer(); if loading { ProgressView() }; Text(loading ? "正在结合上下文查询…" : "查询语境词义"); Spacer() }
                     }
-                }
-                if loading { ProgressView("正在查询…") }
-                if !phonetic.isEmpty || !definition.isEmpty || !translation.isEmpty {
-                    Section("释义") {
-                        if !phonetic.isEmpty { Text(phonetic).foregroundColor(.secondary) }
-                        if !translation.isEmpty { Text(translation).foregroundColor(AppTheme.purple) }
-                        if !definition.isEmpty { Text(definition) }
+                    .buttonStyle(.borderedProminent).disabled(word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loading)
                     }
+
+                    if !translation.isEmpty {
+                        resultCard(title: "在这里的意思", systemImage: "sparkles", color: AppTheme.purple) {
+                            Text(translation).font(.title3.weight(.semibold)).foregroundColor(AppTheme.purple)
+                        }
+                    }
+                    if !phonetic.isEmpty || frequency != nil {
+                        resultCard(title: "词汇信息", systemImage: "textformat.abc", color: .blue) {
+                            if !phonetic.isEmpty { Text(phonetic).font(.title3).foregroundColor(.secondary) }
+                            if let frequency {
+                                Label("COCA #\(frequency.rank) · \(frequency.level)\(frequency.partOfSpeech.isEmpty ? "" : " · \(frequency.partOfSpeech)")", systemImage: "chart.bar.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    if !definition.isEmpty {
+                        resultCard(title: "英文词典释义", systemImage: "book.closed", color: .orange) {
+                            Text(definition).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if !word.isEmpty {
+                        resultCard(title: "更多词典", systemImage: "globe", color: .green) {
+                            HStack {
+                                Button("系统词典") { showSystemDictionary = true }
+                                Spacer()
+                                Link("Cambridge", destination: dictionaryURL("https://dictionary.cambridge.org/dictionary/english-chinese-simplified/"))
+                                Spacer()
+                                Link("Collins", destination: dictionaryURL("https://www.collinsdictionary.com/dictionary/english/"))
+                            }.font(.subheadline)
+                        }
+                    }
+                    Button { save() } label: {
+                        Label("收藏单词、例句翻译与原声", systemImage: "plus.circle.fill")
+                            .frame(maxWidth: .infinity).padding(.vertical, 5)
+                    }
+                    .buttonStyle(.borderedProminent).disabled(word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loading)
                 }
-                Section { Button("连同例句加入生词库") { save() }.disabled(word.isEmpty || loading) }
+                .padding(18)
             }
-            .navigationTitle("查词").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            .background(AppTheme.background.ignoresSafeArea())
+            .navigationTitle("上下文释义").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("收藏") { save() }.disabled(word.isEmpty || loading) }
+            }
             .sheet(isPresented: $showSystemDictionary) { SystemDictionaryView(term: word) }
             .alert("查询失败", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
+            .onAppear { if !word.isEmpty { lookup() } }
         }
     }
 
+    private func resultCard<Content: View>(title: String, systemImage: String, color: Color, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Label(title, systemImage: systemImage).font(.headline).foregroundColor(color)
+            content()
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
     private func lookup() {
+        let selected = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty else { return }
         loading = true
         Task {
-            async let dictionary = try? DictionaryService().lookup(word)
-            async let translated = try? MicrosoftTranslator.shared.translateWithContext(previous: nil, current: word, next: segment.text, to: store.targetLanguage)
-            let (result, translatedWord) = await (dictionary, translated)
+            let result = try? await DictionaryService().lookup(selected)
+            let resolvedSentenceTranslation = sentenceTranslation.isEmpty
+                ? ((try? await MicrosoftTranslator.shared.translate(request.segment.text, to: store.targetLanguage)) ?? "")
+                : sentenceTranslation
+            let translatedWord = try? await ContextDefinitionService().meaning(
+                of: selected,
+                previous: request.previous,
+                sentence: request.segment.text,
+                next: request.next,
+                dictionary: result,
+                targetLanguage: store.targetLanguage,
+                configuration: ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
+                                                              baseURL: store.contextGPTBaseURL,
+                                                              apiKey: store.contextGPTAPIKey,
+                                                              model: store.contextGPTModel))
             phonetic = result?.phonetic ?? ""
             definition = result?.definition ?? ""
             translation = translatedWord ?? ""
+            sentenceTranslation = resolvedSentenceTranslation
+            frequency = WordFrequencyService().lookup(selected)
             if result == nil && translatedWord == nil { errorText = "未查询到结果，请检查网络或换用系统词典。" }
             loading = false
         }
@@ -360,14 +463,38 @@ private struct WordLearningView: View {
                 loading = false
                 return
             }
-            var sentenceTranslation = segment.translation ?? ""
-            if sentenceTranslation.isEmpty {
-                sentenceTranslation = (try? await MicrosoftTranslator.shared.translate(segment.text, to: store.targetLanguage)) ?? ""
+            let selected = word.trimmingCharacters(in: .whitespacesAndNewlines)
+            var savedPhonetic = phonetic
+            var savedDefinition = definition
+            var savedMeaning = translation
+            var savedFrequency = frequency
+            if savedMeaning.isEmpty || savedDefinition.isEmpty {
+                let dictionary = try? await DictionaryService().lookup(selected)
+                if savedPhonetic.isEmpty { savedPhonetic = dictionary?.phonetic ?? "" }
+                if savedDefinition.isEmpty { savedDefinition = dictionary?.definition ?? "" }
+                if savedMeaning.isEmpty {
+                    savedMeaning = (try? await ContextDefinitionService().meaning(
+                        of: selected,
+                        previous: request.previous,
+                        sentence: request.segment.text,
+                        next: request.next,
+                        dictionary: dictionary,
+                        targetLanguage: store.targetLanguage,
+                        configuration: ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
+                                                                      baseURL: store.contextGPTBaseURL,
+                                                                      apiKey: store.contextGPTAPIKey,
+                                                                      model: store.contextGPTModel))) ?? ""
+                }
+            }
+            if savedFrequency == nil { savedFrequency = WordFrequencyService().lookup(selected) }
+            var savedSentenceTranslation = sentenceTranslation
+            if savedSentenceTranslation.isEmpty {
+                savedSentenceTranslation = (try? await MicrosoftTranslator.shared.translate(request.segment.text, to: store.targetLanguage)) ?? ""
             }
             do {
                 let itemID = UUID()
-                let clip = try await AudioClipStore.create(from: sourceURL, itemID: itemID, start: segment.start, end: segment.end)
-                store.addVocabulary(VocabularyItem(id: itemID, word: word.trimmingCharacters(in: .whitespacesAndNewlines), phonetic: phonetic, definition: definition, translation: translation, sentence: segment.text, sentenceTranslation: sentenceTranslation, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: segment.start, audioClipFilename: clip))
+                let clip = try await AudioClipStore.create(from: sourceURL, itemID: itemID, start: request.segment.start, end: request.segment.end)
+                store.addVocabulary(VocabularyItem(id: itemID, word: selected, phonetic: savedPhonetic, definition: savedDefinition, translation: savedMeaning, sentence: request.segment.text, sentenceTranslation: savedSentenceTranslation, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: request.segment.start, audioClipFilename: clip, frequencyRank: savedFrequency?.rank))
                 loading = false
                 dismiss()
             } catch {
@@ -375,6 +502,11 @@ private struct WordLearningView: View {
                 loading = false
             }
         }
+    }
+
+    private func dictionaryURL(_ base: String) -> URL {
+        let encoded = word.trimmingCharacters(in: .whitespacesAndNewlines).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? word
+        return URL(string: base + encoded)!
     }
 }
 

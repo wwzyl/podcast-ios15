@@ -29,7 +29,7 @@ actor WhisperTranscriber {
 
     func transcribeStream(audioURL: URL, episode: Episode, language: String = "auto") -> AsyncThrowingStream<TranscriptionBatch, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 do {
                     try await self.runTranscription(audioURL: audioURL, episode: episode, language: language, continuation: continuation)
                     continuation.finish()
@@ -37,6 +37,7 @@ actor WhisperTranscriber {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in producer.cancel() }
         }
     }
 
@@ -73,36 +74,61 @@ actor WhisperTranscriber {
         guard reader.startReading() else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
 
         let samplesPerSecond = 16_000
-        let chunkSize = samplesPerSecond * 30
+        // 20 秒低延迟窗、5 秒重叠；UI 按完整句提交，不按固定窗粗暴显示。
+        let firstWindowSize = samplesPerSecond * 20
+        let firstStepSize = samplesPerSecond * 15
+        let regularWindowSize = samplesPerSecond * 20
+        let regularStepSize = samplesPerSecond * 15
         var pending: [Float] = []
-        pending.reserveCapacity(chunkSize + samplesPerSecond)
+        pending.reserveCapacity(regularWindowSize + samplesPerSecond)
         var processedSamples = 0
         var allSegments: [TranscriptSegment] = []
+        var acceptedThrough: TimeInterval = 0
+        var assembler = SentenceAssembler()
 
         while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
             try Task.checkCancellation()
             pending.append(contentsOf: samples(from: sampleBuffer))
-            while pending.count >= chunkSize {
-                let chunk = Array(pending.prefix(chunkSize))
-                pending.removeFirst(chunkSize)
+            var windowSize = processedSamples == 0 ? firstWindowSize : regularWindowSize
+            var stepSize = processedSamples == 0 ? firstStepSize : regularStepSize
+            while pending.count >= windowSize {
+                let chunk = Array(pending.prefix(windowSize))
                 let baseTime = Double(processedSamples) / Double(samplesPerSecond)
-                let segments = try transcribeChunk(chunk, context: context, language: language, baseTime: baseTime)
-                processedSamples += chunk.count
-                allSegments.append(contentsOf: segments)
-                try? TranscriptCache.save(allSegments, episodeID: episode.id)
-                let progress = duration.isFinite && duration > 0 ? min(1, (baseTime + 30) / duration) : 0
-                continuation.yield(TranscriptionBatch(segments: segments, progress: progress))
+                let raw = try transcribeChunk(chunk, context: context, language: language, baseTime: baseTime)
+                let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
+                let stable = raw.filter {
+                    let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
+                    return midpoint >= acceptedThrough - 0.05 && midpoint < boundary
+                }
+                acceptedThrough = boundary
+                let sentences = assembler.consume(stable)
+                if !sentences.isEmpty {
+                    allSegments.append(contentsOf: sentences)
+                    try? TranscriptCache.save(allSegments, episodeID: episode.id)
+                }
+                continuation.yield(TranscriptionBatch(segments: sentences, progress: progress(at: boundary, duration: duration)))
+                pending.removeFirst(stepSize)
+                processedSamples += stepSize
+                windowSize = regularWindowSize
+                stepSize = regularStepSize
             }
         }
         guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
         if pending.count >= samplesPerSecond {
             let baseTime = Double(processedSamples) / Double(samplesPerSecond)
-            let segments = try transcribeChunk(pending, context: context, language: language, baseTime: baseTime)
-            allSegments.append(contentsOf: segments)
-            try? TranscriptCache.save(allSegments, episodeID: episode.id)
-            continuation.yield(TranscriptionBatch(segments: segments, progress: 1))
+            let raw = try transcribeChunk(pending, context: context, language: language, baseTime: baseTime)
+            let remaining = raw.filter {
+                let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
+                return midpoint >= acceptedThrough - 0.05
+            }
+            var sentences = assembler.consume(remaining)
+            if let finalSentence = assembler.finish() { sentences.append(finalSentence) }
+            allSegments.append(contentsOf: sentences)
+            if !sentences.isEmpty { continuation.yield(TranscriptionBatch(segments: sentences, progress: 1)) }
         }
         guard !allSegments.isEmpty else { throw WhisperTranscriptionError.transcriptionFailed }
+        try TranscriptCache.save(allSegments, episodeID: episode.id)
+        try TranscriptCache.markComplete(episodeID: episode.id)
     }
 
     private func transcribeChunk(_ samples: [Float], context: OpaquePointer, language: String, baseTime: TimeInterval) throws -> [TranscriptSegment] {
@@ -112,7 +138,8 @@ actor WhisperTranscriber {
         params.print_timestamps = false
         params.print_special = false
         params.translate = false
-        params.n_threads = Int32(max(1, min(6, ProcessInfo.processInfo.processorCount - 2)))
+        // iPhone 7 只有两个高性能可用核心；旧算法减去 2 后只剩单线程，是明显慢点。
+        params.n_threads = Int32(max(1, min(4, ProcessInfo.processInfo.activeProcessorCount)))
         params.no_context = false
         params.single_segment = false
         let status: Int32 = language.withCString { code in
@@ -133,6 +160,10 @@ actor WhisperTranscriber {
         return result
     }
 
+    private func progress(at time: TimeInterval, duration: TimeInterval) -> Double {
+        duration.isFinite && duration > 0 ? min(1, time / duration) : 0
+    }
+
     private func samples(from sampleBuffer: CMSampleBuffer) -> [Float] {
         guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return [] }
         var length = 0
@@ -142,6 +173,54 @@ actor WhisperTranscriber {
         let count = length / MemoryLayout<Int16>.size
         let values = UnsafeRawPointer(pointer).bindMemory(to: Int16.self, capacity: count)
         return (0..<count).map { Float(Int16(littleEndian: values[$0])) / 32768 }
+    }
+}
+
+private struct SentenceAssembler {
+    private var pending: TranscriptSegment?
+    private let terminalPattern = #"[.!?。！？…][\"'”’)]*$"#
+
+    mutating func consume(_ fragments: [TranscriptSegment]) -> [TranscriptSegment] {
+        var completed: [TranscriptSegment] = []
+        for fragment in fragments {
+            guard !fragment.text.isEmpty else { continue }
+            if let current = pending {
+                let gap = fragment.start - (current.end ?? current.start)
+                if isTerminal(current.text) || gap > 1.8 {
+                    completed.append(current)
+                    pending = fragment
+                } else {
+                    let separator = needsSpace(after: current.text, before: fragment.text) ? " " : ""
+                    pending = TranscriptSegment(id: current.id,
+                                                start: current.start,
+                                                end: fragment.end,
+                                                text: current.text + separator + fragment.text)
+                }
+            } else {
+                pending = fragment
+            }
+            if let current = pending, isTerminal(current.text) {
+                completed.append(current)
+                pending = nil
+            }
+        }
+        return completed
+    }
+
+    mutating func finish() -> TranscriptSegment? {
+        defer { pending = nil }
+        return pending
+    }
+
+    private func isTerminal(_ text: String) -> Bool {
+        text.range(of: terminalPattern, options: .regularExpression) != nil
+    }
+
+    private func needsSpace(after left: String, before right: String) -> Bool {
+        guard let first = right.first, let last = left.last else { return false }
+        if ",.;:!?。！？…，；：)]}”’".contains(first) { return false }
+        if "([{“‘\"".contains(last) { return false }
+        return true
     }
 }
 
@@ -174,9 +253,24 @@ enum TranscriptCache {
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(segments).write(to: destination, options: .atomic)
     }
+    static func isComplete(episodeID: String) -> Bool {
+        FileManager.default.fileExists(atPath: completionURL(episodeID: episodeID).path)
+    }
+    static func markComplete(episodeID: String) throws {
+        let destination = completionURL(episodeID: episodeID)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("complete".utf8).write(to: destination, options: .atomic)
+    }
+    static func clear(episodeID: String) {
+        try? FileManager.default.removeItem(at: url(episodeID: episodeID))
+        try? FileManager.default.removeItem(at: completionURL(episodeID: episodeID))
+    }
     private static func url(episodeID: String) -> URL {
         let safe = episodeID.data(using: .utf8)?.base64EncodedString().replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-") ?? UUID().uuidString
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return root.appendingPathComponent("Transcripts", isDirectory: true).appendingPathComponent(String(safe.prefix(120)) + ".json")
+    }
+    private static func completionURL(episodeID: String) -> URL {
+        url(episodeID: episodeID).appendingPathExtension("complete")
     }
 }

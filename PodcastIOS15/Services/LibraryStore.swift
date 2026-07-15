@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 @MainActor
 final class LibraryStore: ObservableObject {
@@ -14,6 +15,7 @@ final class LibraryStore: ObservableObject {
     @Published var contextGPTBaseURL = "https://api.openai.com/v1" { didSet { UserDefaults.standard.set(contextGPTBaseURL, forKey: "contextGPTBaseURL") } }
     @Published var contextGPTAPIKey = "" { didSet { UserDefaults.standard.set(contextGPTAPIKey, forKey: "contextGPTAPIKey") } }
     @Published var contextGPTModel = "gpt-4o-mini" { didSet { UserDefaults.standard.set(contextGPTModel, forKey: "contextGPTModel") } }
+    private var repairingArtwork = false
 
     private let decoder: JSONDecoder = {
         let value = JSONDecoder()
@@ -39,13 +41,51 @@ final class LibraryStore: ObservableObject {
 
     func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil) async throws {
         var podcast = try await RSSService().load(feedURL: feedURL)
-        if podcast.artworkURL == nil { podcast.artworkURL = fallbackArtworkURL }
+        // Apple 搜索结果的封面通常比 RSS 中的旧 HTTP 地址更稳定。
+        podcast.artworkURL = fallbackArtworkURL ?? podcast.artworkURL ?? podcast.episodes.compactMap(\.artworkURL).first
         if let index = podcasts.firstIndex(where: { $0.feedURL == feedURL }) {
             podcasts[index] = podcast
         } else {
             podcasts.insert(podcast, at: 0)
         }
         savePodcasts()
+    }
+
+    /// 为升级前已经收藏、但缺失或已经失效的频道封面补齐封面并持久化。
+    func repairMissingArtwork() async {
+        guard !repairingArtwork else { return }
+        repairingArtwork = true
+        defer { repairingArtwork = false }
+        var changed = false
+        for podcastID in podcasts.map(\.id) {
+            guard let index = podcasts.firstIndex(where: { $0.id == podcastID }) else { continue }
+            let podcast = podcasts[index]
+            if let current = podcast.artworkURL, await artworkCanBeDisplayed(current) { continue }
+            var resolved: URL?
+            for candidate in podcast.episodes.compactMap(\.artworkURL) {
+                if await artworkCanBeDisplayed(candidate) { resolved = candidate; break }
+            }
+            if resolved == nil {
+                resolved = try? await PodcastSearchService().artworkURL(feedURL: podcast.feedURL, title: podcast.title)
+            }
+            if let resolved, let currentIndex = podcasts.firstIndex(where: { $0.id == podcastID }) {
+                podcasts[currentIndex].artworkURL = resolved
+                changed = true
+            }
+        }
+        if changed { savePodcasts() }
+    }
+
+    private func artworkCanBeDisplayed(_ url: URL) async -> Bool {
+        guard url.scheme?.lowercased() == "https" else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              !data.isEmpty else { return false }
+        return UIImage(data: data) != nil
     }
 
     func refresh(_ podcast: Podcast) async throws {

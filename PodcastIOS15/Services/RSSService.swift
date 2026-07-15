@@ -77,9 +77,19 @@ private final class RSSParser: NSObject, XMLParserDelegate {
             insideItem = true
             currentItem = Item()
         }
-        if !insideItem && key == "image" { insideChannelImage = true }
+        if !insideItem && key == "image" {
+            insideChannelImage = true
+            if channelArtwork.isEmpty { channelArtwork = attributeDict["href"] ?? attributeDict["url"] ?? "" }
+        }
         if insideItem && (key == "enclosure" || key == "media:content") {
-            currentItem.audio = attributeDict["url"] ?? currentItem.audio
+            let medium = attributeDict["medium"]?.lowercased()
+            let type = attributeDict["type"]?.lowercased()
+            let isImage = medium == "image" || type?.hasPrefix("image/") == true
+            if isImage {
+                currentItem.artwork = attributeDict["url"] ?? currentItem.artwork
+            } else {
+                currentItem.audio = attributeDict["url"] ?? currentItem.audio
+            }
         }
         if insideItem && key == "link" && attributeDict["rel"] == "enclosure" {
             currentItem.audio = attributeDict["href"] ?? currentItem.audio

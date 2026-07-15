@@ -45,21 +45,10 @@ struct VocabularyExporter {
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
         let databaseURL = folder.appendingPathComponent("collection.anki2")
         let mediaURL = folder.appendingPathComponent("media")
-        var mediaMap: [String: String] = [:]
-        var audioFields: [UUID: String] = [:]
-        for item in items {
-            guard let filename = item.audioClipFilename else { continue }
-            let source = AudioClipStore.url(for: filename)
-            guard fileManager.fileExists(atPath: source.path) else { continue }
-            let index = String(mediaMap.count)
-            let mediaName = "Aisten_\(item.id.uuidString).m4a"
-            try fileManager.copyItem(at: source, to: folder.appendingPathComponent(index))
-            mediaMap[index] = mediaName
-            audioFields[item.id] = "[sound:\(mediaName)]"
-        }
+        let mediaMap: [String: String] = [:]
         try JSONSerialization.data(withJSONObject: mediaMap, options: [.sortedKeys]).write(to: mediaURL)
         let normalizedDeckName = deckName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Podcast iOS15" : deckName.trimmingCharacters(in: .whitespacesAndNewlines)
-        try createDatabase(at: databaseURL, items: items, templateType: template, deckName: normalizedDeckName, audioFields: audioFields)
+        try createDatabase(at: databaseURL, items: items, templateType: template, deckName: normalizedDeckName)
         let archiveURL = temporaryURL("PodcastIOS15_\(template.title).apkg")
         try? fileManager.removeItem(at: archiveURL)
         let archive: Archive
@@ -67,13 +56,10 @@ struct VocabularyExporter {
         catch { throw ExportError.cannotCreateArchive }
         try archive.addEntry(with: "collection.anki2", fileURL: databaseURL, compressionMethod: .deflate)
         try archive.addEntry(with: "media", fileURL: mediaURL, compressionMethod: .deflate)
-        for index in mediaMap.keys.sorted(by: { Int($0)! < Int($1)! }) {
-            try archive.addEntry(with: index, fileURL: folder.appendingPathComponent(index), compressionMethod: .deflate)
-        }
         return archiveURL
     }
 
-    private func createDatabase(at url: URL, items: [VocabularyItem], templateType: AnkiTemplateType, deckName: String, audioFields: [UUID: String]) throws {
+    private func createDatabase(at url: URL, items: [VocabularyItem], templateType: AnkiTemplateType, deckName: String) throws {
         var database: OpaquePointer?
         guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else { throw ExportError.cannotCreateDatabase }
         defer { sqlite3_close(database) }
@@ -92,7 +78,8 @@ struct VocabularyExporter {
         let deckID = stableID("deck|\(deckName.lowercased())")
         let cardFormats = formats(for: templateType)
         let template: [String: Any] = ["name": templateType.title, "ord": 0, "qfmt": cardFormats.question, "afmt": cardFormats.answer, "bqfmt": "", "bafmt": "", "bfont": "", "bsize": 0, "did": NSNull()]
-        let fieldNames = ["Word", "WordAudio", "Symbol", "Sentence1", "Audio1", "Source1", "Translation1", "Definition", "SentenceCloze", "Backlink", "FrequencyRank"]
+        // Anki 只携带用户要求的四项学习内容，不导出播客来源或系统词典释义。
+        let fieldNames = ["Word", "Sentence", "SentenceTranslation", "ContextMeaning"]
         let fields: [[String: Any]] = fieldNames.enumerated().map {
             ["name": $0.element, "ord": $0.offset, "sticky": false, "rtl": false, "font": "Arial", "size": 20, "media": []]
         }
@@ -100,8 +87,8 @@ struct VocabularyExporter {
             "id": String(modelID), "name": officialModelName(for: templateType), "type": templateType == .questionAnswer ? 0 : 1, "mod": now, "usn": -1, "sortf": 0, "did": deckID,
             "tmpls": [template],
             "flds": fields,
-            "css": ".card{font-family:-apple-system,Arial;font-size:20px;text-align:left;color:#222;background:#fff}.word{font-size:32px;font-weight:700;color:#5856d6}.phonetic{color:#777;margin:4px 0 16px}.sentence{font-size:22px;margin:12px 0}.translation{font-size:24px;color:#5856d6;margin:12px 0}.context,.source{color:#777;margin-top:10px}.source{font-size:13px}.cloze{font-weight:700;color:#5856d6}",
-            "latexPre": "", "latexPost": "", "latexsvg": false, "req": [[0, "all", [templateType == .questionAnswer ? 0 : 8]]], "tags": [], "vers": []
+            "css": ".card{font-family:-apple-system,Arial;font-size:20px;text-align:left;color:#222;background:#fff}.word{font-size:32px;font-weight:700;color:#5856d6}.sentence{font-size:22px;line-height:1.45;margin:16px 0}.sentence-translation{font-size:20px;color:#5856d6;margin:14px 0}.context-meaning{font-size:24px;font-weight:600;color:#5856d6;margin:14px 0}.label{font-size:13px;color:#888;margin-top:18px}",
+            "latexPre": "", "latexPost": "", "latexsvg": false, "req": [[0, "all", [templateType == .questionAnswer ? 0 : 1]]], "tags": [], "vers": []
         ]
         let today = [0, 0]
         let deck: [String: Any] = ["id": deckID, "name": deckName, "mod": now, "usn": -1, "desc": "从 Podcast iOS15 生词库导出", "dyn": 0, "collapsed": false, "browserCollapsed": false, "extendNew": 0, "extendRev": 50, "conf": 1, "newToday": today, "revToday": today, "lrnToday": today, "timeToday": today]
@@ -120,9 +107,8 @@ struct VocabularyExporter {
             let noteID = stableID("note|\(fingerprint)")
             let cardID = stableID("card|\(templateType.rawValue)|\(fingerprint)")
             let cloze = clozeSentence(for: item, type: templateType)
-            let source = "\(item.podcastTitle) — \(item.episodeTitle) [\(item.timestamp.clockString)]"
-            let backlink = "podcastios15://episode/\(item.id.uuidString)"
-            let noteFields = [item.word, "", item.phonetic ?? "", item.sentence, audioFields[item.id] ?? "", source, item.sentenceTranslation.isEmpty ? item.translation : item.sentenceTranslation, item.definition, cloze, backlink, item.frequencyRank.map { String($0) } ?? ""]
+            let exportedSentence = templateType == .questionAnswer ? item.sentence : cloze
+            let noteFields = [item.word, exportedSentence, item.sentenceTranslation, item.translation]
             let fields = noteFields.map(htmlPreservingAnkiMarkup).joined(separator: "\u{1f}")
             let checksum = sha1Checksum(item.word)
             try execute(database, "INSERT INTO notes VALUES (\(noteID),'\(stableGUID(fingerprint))',\(modelID),\(now),-1,' ','\(sql(fields))','\(sql(item.word))',\(checksum),0,'');")
@@ -151,22 +137,23 @@ struct VocabularyExporter {
         return html(value)
     }
     private func formats(for type: AnkiTemplateType) -> (question: String, answer: String) {
-        let wordFront = "<div class=\"section word\"><h1>{{Word}}{{WordAudio}}</h1><i>{{Symbol}}</i></div><div class=\"section sentence\"><blockquote>{{Sentence1}}{{Audio1}}<cite>{{Source1}}</cite></blockquote></div>"
-        let wordBack = "{{FrontSide}}<div class=\"section translation\">{{Translation1}}</div><div class=\"section definition\">{{Definition}}</div><div class=\"section backlink\">{{Backlink}}</div>"
+        let wordFront = "<div class=\"word\">{{Word}}</div><div class=\"sentence\">{{Sentence}}</div>"
+        let wordBack = "{{FrontSide}}<hr><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>"
         switch type {
         case .questionAnswer:
             return (wordFront, wordBack)
         case .cloze:
-            return ("<div class=\"section sentence\">{{cloze:SentenceCloze}}{{Audio1}}<cite>{{Source1}}</cite></div>", "{{FrontSide}}<div class=\"section word\">{{Word}}</div><div class=\"section translation\">{{Translation1}}</div><div class=\"section definition\">{{Definition}}</div>")
+            return ("<div class=\"sentence\">{{cloze:Sentence}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
         case .typeCloze:
-            return ("<div class=\"section sentence\">{{type:cloze:SentenceCloze}}{{Audio1}}<cite>{{Source1}}</cite></div>", "{{FrontSide}}<div class=\"section word\">{{Word}}</div><div class=\"section translation\">{{Translation1}}</div><div class=\"section definition\">{{Definition}}</div>")
+            return ("<div class=\"sentence\">{{type:cloze:Sentence}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
         }
     }
     private func officialModelName(for type: AnkiTemplateType) -> String {
         switch type {
-        case .questionAnswer: return "Aisten Word QA_2025-03-11"
-        case .cloze: return "Aisten Word Cloze_2025-11-08"
-        case .typeCloze: return "Aisten Word Type Cloze_2025-11-08"
+        // 与旧的 11 字段模型使用不同 ID，避免 Anki 将新四字段笔记误判为旧模型。
+        case .questionAnswer: return "Podcast Context Word QA_2026-07-15"
+        case .cloze: return "Podcast Context Word Cloze_2026-07-15"
+        case .typeCloze: return "Podcast Context Word Type Cloze_2026-07-15"
         }
     }
     private func clozeSentence(for item: VocabularyItem, type: AnkiTemplateType) -> String {
@@ -186,9 +173,7 @@ struct VocabularyExporter {
     }
     private func noteFingerprint(_ item: VocabularyItem) -> String {
         [item.word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines),
-         item.sentence.trimmingCharacters(in: .whitespacesAndNewlines),
-         item.episodeTitle,
-         String(Int(item.timestamp * 10))].joined(separator: "|")
+         item.sentence.trimmingCharacters(in: .whitespacesAndNewlines)].joined(separator: "|")
     }
     private func stableID(_ value: String) -> Int64 {
         let digest = SHA256.hash(data: Data(value.utf8))

@@ -141,12 +141,20 @@ struct PlayerView: View {
     }
 
     private func prepareAudio(retry: Bool = false) {
-        if player.episode?.id == episode.id { return }
+        if player.episode?.id == episode.id {
+            if episode.transcriptURL == nil, let audioURL = downloads.localURL(for: episode) {
+                transcription.start(episode: episode, audioURL: audioURL)
+            }
+            return
+        }
         preparingAudio = true
         Task {
             do {
                 let url = retry ? try await downloads.retry(episode) : try await downloads.download(episode)
                 player.load(episode, sourceURL: url)
+                if episode.transcriptURL == nil {
+                    transcription.start(episode: episode, audioURL: url)
+                }
             } catch {
                 errorText = "音频准备失败：\(error.localizedDescription)"
             }

@@ -55,6 +55,8 @@ struct VocabularyView: View {
                         }.pickerStyle(.inline)
                     }
                     Section {
+                        Text("卡片只包含：生词、所在句子、句子释义、该词在上下文中的释义。不会导出系统词典释义或播客来源。")
+                            .font(.caption).foregroundColor(.secondary)
                         Text("同一牌组再次导入时使用稳定的卡片标识；Anki 会保留已有卡片的学习进度，并加入新的生词卡。")
                             .font(.caption).foregroundColor(.secondary)
                     }
@@ -78,8 +80,12 @@ struct VocabularyView: View {
         exporting = false
     }
     private func exportAnki(_ template: AnkiTemplateType, deckName: String) {
+        let items = store.vocabulary.filter { $0.word != "★ 收藏句子" }
+        guard !items.isEmpty else {
+            errorText = "当前没有可导出的生词；收藏的整句不会作为生词卡导出。"
+            return
+        }
         exporting = true
-        let items = store.vocabulary
         Task.detached {
             do {
                 let url = try VocabularyExporter().apkg(items, template: template, deckName: deckName)

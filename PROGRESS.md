@@ -124,3 +124,15 @@
 - `PodcastIOS15/Services/AnkiExporter.swift`：CSV/APKG 导出
 - `PodcastIOS15/Views/PlayerView.swift`：6.3.5 风格逐句播放页
 - `README.md`：构建和使用说明
+
+## 2026-07-15：1.2.1（5）真机反馈修复
+
+- [x] 44. 将下载完成后的自动 Whisper 触发提升到 `RootView`：根视图监听整集音频进入 ready 状态并启动 `TranscriptionManager`，播放页同时保留显式兜底，不再依赖用户点击“转录”。
+- [x] 45. 转录任务继续由 App 根节点持有，并增加 iOS 后台任务保护；退出播放页不会取消任务。App 真正切到系统后台时，播放中的后台音频模式与系统授予的后台执行时间共同决定可连续运行时长。
+- [x] 46. Anki 新模型缩减为 `Word / Sentence / SentenceTranslation / ContextMeaning` 四字段；移除系统词典释义、播客/单集来源、时间点、回链、音标、词频和音频，只导出生词、例句、例句释义和页面生成的上下文释义。
+- [x] 47. Anki 导出排除“★ 收藏句子”伪生词；四字段模型使用新的稳定 model ID，避免与旧 11 字段模型冲突。
+- [x] 48. 首页封面修复旧收藏数据：优先验证已有频道封面，再尝试单集封面，最后按 feed URL/标题从 Apple Podcasts CN/US 搜索结果补齐并保存。
+- [x] 49. 修复 RSS `media:content` 图片被误当音频的问题，并支持带 `href/url` 属性的频道 `<image>`。
+- [x] 50. 版本提升为 1.2.1（5）；Plist/Assets JSON、资源尺寸、iOS 16+ API 扫描和 `git diff --check` 已通过静态检查。
+- [ ] 51. 上传 GitHub 后等待 Xcode 15.4 Actions 完成 23 个 Swift 文件的真实 Release 编译与 IPA 打包。
+- [ ] 52. 真机确认：下载完成无需点击即开始转录、退出播放页继续增长进度、旧收藏封面被补齐，以及 APKG 四字段内容正确。

@@ -45,10 +45,21 @@ struct VocabularyExporter {
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
         let databaseURL = folder.appendingPathComponent("collection.anki2")
         let mediaURL = folder.appendingPathComponent("media")
-        let mediaMap: [String: String] = [:]
+        var mediaMap: [String: String] = [:]
+        var audioFields: [UUID: String] = [:]
+        for item in items {
+            guard let filename = item.audioClipFilename else { continue }
+            let source = AudioClipStore.url(for: filename)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            let index = String(mediaMap.count)
+            let mediaName = "PodcastSentence_\(item.id.uuidString).m4a"
+            try fileManager.copyItem(at: source, to: folder.appendingPathComponent(index))
+            mediaMap[index] = mediaName
+            audioFields[item.id] = "[sound:\(mediaName)]"
+        }
         try JSONSerialization.data(withJSONObject: mediaMap, options: [.sortedKeys]).write(to: mediaURL)
         let normalizedDeckName = deckName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Podcast iOS15" : deckName.trimmingCharacters(in: .whitespacesAndNewlines)
-        try createDatabase(at: databaseURL, items: items, templateType: template, deckName: normalizedDeckName)
+        try createDatabase(at: databaseURL, items: items, templateType: template, deckName: normalizedDeckName, audioFields: audioFields)
         let archiveURL = temporaryURL("PodcastIOS15_\(template.title).apkg")
         try? fileManager.removeItem(at: archiveURL)
         let archive: Archive
@@ -56,10 +67,13 @@ struct VocabularyExporter {
         catch { throw ExportError.cannotCreateArchive }
         try archive.addEntry(with: "collection.anki2", fileURL: databaseURL, compressionMethod: .deflate)
         try archive.addEntry(with: "media", fileURL: mediaURL, compressionMethod: .deflate)
+        for index in mediaMap.keys.sorted(by: { Int($0)! < Int($1)! }) {
+            try archive.addEntry(with: index, fileURL: folder.appendingPathComponent(index), compressionMethod: .deflate)
+        }
         return archiveURL
     }
 
-    private func createDatabase(at url: URL, items: [VocabularyItem], templateType: AnkiTemplateType, deckName: String) throws {
+    private func createDatabase(at url: URL, items: [VocabularyItem], templateType: AnkiTemplateType, deckName: String, audioFields: [UUID: String]) throws {
         var database: OpaquePointer?
         guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else { throw ExportError.cannotCreateDatabase }
         defer { sqlite3_close(database) }
@@ -78,8 +92,8 @@ struct VocabularyExporter {
         let deckID = stableID("deck|\(deckName.lowercased())")
         let cardFormats = formats(for: templateType)
         let template: [String: Any] = ["name": templateType.title, "ord": 0, "qfmt": cardFormats.question, "afmt": cardFormats.answer, "bqfmt": "", "bafmt": "", "bfont": "", "bsize": 0, "did": NSNull()]
-        // Anki 只携带用户要求的四项学习内容，不导出播客来源或系统词典释义。
-        let fieldNames = ["Word", "Sentence", "SentenceTranslation", "ContextMeaning"]
+        // 四项文字内容加原句音频；不导出播客来源或系统词典释义。
+        let fieldNames = ["Word", "Sentence", "SentenceTranslation", "ContextMeaning", "SentenceAudio"]
         let fields: [[String: Any]] = fieldNames.enumerated().map {
             ["name": $0.element, "ord": $0.offset, "sticky": false, "rtl": false, "font": "Arial", "size": 20, "media": []]
         }
@@ -108,7 +122,7 @@ struct VocabularyExporter {
             let cardID = stableID("card|\(templateType.rawValue)|\(fingerprint)")
             let cloze = clozeSentence(for: item, type: templateType)
             let exportedSentence = templateType == .questionAnswer ? item.sentence : cloze
-            let noteFields = [item.word, exportedSentence, item.sentenceTranslation, item.translation]
+            let noteFields = [item.word, exportedSentence, item.sentenceTranslation, item.translation, audioFields[item.id] ?? ""]
             let fields = noteFields.map(htmlPreservingAnkiMarkup).joined(separator: "\u{1f}")
             let checksum = sha1Checksum(item.word)
             try execute(database, "INSERT INTO notes VALUES (\(noteID),'\(stableGUID(fingerprint))',\(modelID),\(now),-1,' ','\(sql(fields))','\(sql(item.word))',\(checksum),0,'');")
@@ -137,23 +151,23 @@ struct VocabularyExporter {
         return html(value)
     }
     private func formats(for type: AnkiTemplateType) -> (question: String, answer: String) {
-        let wordFront = "<div class=\"word\">{{Word}}</div><div class=\"sentence\">{{Sentence}}</div>"
+        let wordFront = "<div class=\"word\">{{Word}}</div><div class=\"sentence\">{{Sentence}} {{SentenceAudio}}</div>"
         let wordBack = "{{FrontSide}}<hr><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>"
         switch type {
         case .questionAnswer:
             return (wordFront, wordBack)
         case .cloze:
-            return ("<div class=\"sentence\">{{cloze:Sentence}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
+            return ("<div class=\"sentence\">{{cloze:Sentence}} {{SentenceAudio}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
         case .typeCloze:
-            return ("<div class=\"sentence\">{{type:cloze:Sentence}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
+            return ("<div class=\"sentence\">{{type:cloze:Sentence}} {{SentenceAudio}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
         }
     }
     private func officialModelName(for type: AnkiTemplateType) -> String {
         switch type {
         // 与旧的 11 字段模型使用不同 ID，避免 Anki 将新四字段笔记误判为旧模型。
-        case .questionAnswer: return "Podcast Context Word QA_2026-07-15"
-        case .cloze: return "Podcast Context Word Cloze_2026-07-15"
-        case .typeCloze: return "Podcast Context Word Type Cloze_2026-07-15"
+        case .questionAnswer: return "Podcast Context Audio Word QA_2026-07-15"
+        case .cloze: return "Podcast Context Audio Word Cloze_2026-07-15"
+        case .typeCloze: return "Podcast Context Audio Word Type Cloze_2026-07-15"
         }
     }
     private func clozeSentence(for item: VocabularyItem, type: AnkiTemplateType) -> String {

@@ -55,7 +55,7 @@ struct VocabularyView: View {
                         }.pickerStyle(.inline)
                     }
                     Section {
-                        Text("卡片只包含：生词、所在句子、句子释义、该词在上下文中的释义。不会导出系统词典释义或播客来源。")
+                        Text("卡片包含：生词、所在句子、句子原声、句子释义、该词在上下文中的释义。不会导出系统词典释义或播客来源。")
                             .font(.caption).foregroundColor(.secondary)
                         Text("同一牌组再次导入时使用稳定的卡片标识；Anki 会保留已有卡片的学习进度，并加入新的生词卡。")
                             .font(.caption).foregroundColor(.secondary)

@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 @main
 struct PodcastIOS15App: App {
+    @UIApplicationDelegateAdaptor(PodcastAppDelegate.self) private var appDelegate
     @StateObject private var store = LibraryStore()
     @StateObject private var player = PlayerManager()
     @StateObject private var downloads = EpisodeDownloadManager()
@@ -22,6 +24,18 @@ struct PodcastIOS15App: App {
                 .tint(AppTheme.purple)
                 .onOpenURL { url in store.importFile(url) }
         }
+    }
+}
+
+final class PodcastAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == BackgroundDownloadCoordinator.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        BackgroundDownloadCoordinator.shared.handleEvents(completionHandler: completionHandler)
     }
 }
 

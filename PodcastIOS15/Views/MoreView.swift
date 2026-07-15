@@ -34,6 +34,11 @@ struct MoreView: View {
                 Label("支持倍速、15 秒跳转和逐句循环", systemImage: "goforward.15")
             }
             Section("缓存管理") {
+                HStack {
+                    Label("后台下载队列", systemImage: "arrow.down.circle")
+                    Spacer()
+                    Text("\(downloads.queuedCount)").foregroundColor(.secondary)
+                }
                 Picker("自动删除已听过音频缓存文件", selection: $downloads.cachePolicy) {
                     ForEach(AudioCachePolicy.allCases) { policy in Text(policy.title).tag(policy) }
                 }
@@ -50,7 +55,7 @@ struct MoreView: View {
                 Button(role: .destructive) { showClear = true } label: { Label("清空生词库", systemImage: "trash") }
             }
             Section("关于") {
-                HStack { Text("版本"); Spacer(); Text("1.2.1 (5) · iOS 15").foregroundColor(.secondary) }
+                HStack { Text("版本"); Spacer(); Text("1.3.0 (6) · iOS 15").foregroundColor(.secondary) }
                 Text("这是面向 iOS 15 重新实现的播客语言学习工具，界面和主要学习流程参考 Aisten 6.3.5；未使用其不兼容的可执行代码。")
                     .font(.caption).foregroundColor(.secondary)
             }

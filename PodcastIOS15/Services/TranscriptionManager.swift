@@ -37,7 +37,8 @@ final class TranscriptionManager: ObservableObject {
             return
         }
         if force { TranscriptCache.clear(episodeID: episode.id) }
-        jobs[episode.id] = TranscriptionJobState(segments: [], progress: 0, isRunning: true, isComplete: false, errorMessage: nil)
+        let existing = force ? [] : (TranscriptCache.load(episodeID: episode.id) ?? [])
+        jobs[episode.id] = TranscriptionJobState(segments: existing, progress: 0, isRunning: true, isComplete: false, errorMessage: nil)
         beginBackgroundExecution(for: episode.id)
         let generation = UUID()
         generations[episode.id] = generation
@@ -80,6 +81,18 @@ final class TranscriptionManager: ObservableObject {
         tasks[episode.id]?.cancel()
         tasks[episode.id] = nil
         start(episode: episode, audioURL: audioURL, force: true)
+    }
+
+    func retranscribe(episode: Episode, audioURL: URL, from time: TimeInterval) {
+        tasks[episode.id]?.cancel()
+        tasks[episode.id] = nil
+        generations[episode.id] = nil
+        let retained = (TranscriptCache.load(episodeID: episode.id) ?? []).filter {
+            ($0.end ?? $0.start) <= max(0, time)
+        }
+        try? TranscriptCache.savePartial(retained, episodeID: episode.id)
+        try? TranscriptCache.setResumeTime(time, episodeID: episode.id)
+        start(episode: episode, audioURL: audioURL)
     }
 
     private func beginBackgroundExecution(for episodeID: String) {

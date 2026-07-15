@@ -57,6 +57,14 @@ actor WhisperTranscriber {
         let asset = AVURLAsset(url: audioURL)
         guard let track = asset.tracks(withMediaType: .audio).first else { throw WhisperTranscriptionError.audioDecodeFailed }
         let duration = asset.duration.seconds
+        // 只从最后一个已经完整保存的句子之后继续，App 重启后无需从头转录。
+        var allSegments = TranscriptCache.load(episodeID: episode.id) ?? []
+        let cachedEnd = allSegments.last?.end ?? allSegments.last?.start ?? 0
+        let resumeTime = min(max(0, max(cachedEnd, TranscriptCache.resumeTime(episodeID: episode.id) ?? 0)), max(0, duration))
+        if !allSegments.isEmpty, duration.isFinite, resumeTime >= duration - 0.25 {
+            try TranscriptCache.markComplete(episodeID: episode.id)
+            return
+        }
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 16_000,
@@ -71,6 +79,10 @@ actor WhisperTranscriber {
         output.alwaysCopiesSampleData = false
         guard reader.canAdd(output) else { throw WhisperTranscriptionError.audioDecodeFailed }
         reader.add(output)
+        if resumeTime > 0, duration.isFinite, duration > resumeTime {
+            reader.timeRange = CMTimeRange(start: CMTime(seconds: resumeTime, preferredTimescale: 600),
+                                           end: CMTime(seconds: duration, preferredTimescale: 600))
+        }
         guard reader.startReading() else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
 
         let samplesPerSecond = 16_000
@@ -82,8 +94,7 @@ actor WhisperTranscriber {
         var pending: [Float] = []
         pending.reserveCapacity(regularWindowSize + samplesPerSecond)
         var processedSamples = 0
-        var allSegments: [TranscriptSegment] = []
-        var acceptedThrough: TimeInterval = 0
+        var acceptedThrough: TimeInterval = resumeTime
         var assembler = SentenceAssembler()
 
         while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
@@ -93,8 +104,10 @@ actor WhisperTranscriber {
             var stepSize = processedSamples == 0 ? firstStepSize : regularStepSize
             while pending.count >= windowSize {
                 let chunk = Array(pending.prefix(windowSize))
-                let baseTime = Double(processedSamples) / Double(samplesPerSecond)
+                try Task.checkCancellation()
+                let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
                 let raw = try transcribeChunk(chunk, context: context, language: language, baseTime: baseTime)
+                try Task.checkCancellation()
                 let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
                 let stable = raw.filter {
                     let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
@@ -115,8 +128,10 @@ actor WhisperTranscriber {
         }
         guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
         if pending.count >= samplesPerSecond {
-            let baseTime = Double(processedSamples) / Double(samplesPerSecond)
+            try Task.checkCancellation()
+            let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
             let raw = try transcribeChunk(pending, context: context, language: language, baseTime: baseTime)
+            try Task.checkCancellation()
             let remaining = raw.filter {
                 let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
                 return midpoint >= acceptedThrough - 0.05
@@ -260,10 +275,26 @@ enum TranscriptCache {
         let destination = completionURL(episodeID: episodeID)
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("complete".utf8).write(to: destination, options: .atomic)
+        try? FileManager.default.removeItem(at: resumeURL(episodeID: episodeID))
     }
     static func clear(episodeID: String) {
         try? FileManager.default.removeItem(at: url(episodeID: episodeID))
         try? FileManager.default.removeItem(at: completionURL(episodeID: episodeID))
+        try? FileManager.default.removeItem(at: resumeURL(episodeID: episodeID))
+    }
+    static func savePartial(_ segments: [TranscriptSegment], episodeID: String) throws {
+        try? FileManager.default.removeItem(at: completionURL(episodeID: episodeID))
+        try save(segments, episodeID: episodeID)
+    }
+    static func setResumeTime(_ time: TimeInterval, episodeID: String) throws {
+        let destination = resumeURL(episodeID: episodeID)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(String(max(0, time)).utf8).write(to: destination, options: .atomic)
+    }
+    static func resumeTime(episodeID: String) -> TimeInterval? {
+        guard let data = try? Data(contentsOf: resumeURL(episodeID: episodeID)),
+              let value = String(data: data, encoding: .utf8) else { return nil }
+        return TimeInterval(value)
     }
     private static func url(episodeID: String) -> URL {
         let safe = episodeID.data(using: .utf8)?.base64EncodedString().replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-") ?? UUID().uuidString
@@ -272,5 +303,8 @@ enum TranscriptCache {
     }
     private static func completionURL(episodeID: String) -> URL {
         url(episodeID: episodeID).appendingPathExtension("complete")
+    }
+    private static func resumeURL(episodeID: String) -> URL {
+        url(episodeID: episodeID).appendingPathExtension("resume")
     }
 }

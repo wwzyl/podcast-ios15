@@ -38,7 +38,7 @@ private struct PodcastRow: View {
     let podcast: Podcast
     var body: some View {
         HStack(spacing: 13) {
-            AsyncImage(url: podcast.artworkURL) { image in image.resizable().scaledToFill() } placeholder: { Color.secondary.opacity(0.12) }
+            CachedArtworkImage(url: podcast.artworkURL)
                 .frame(width: 68, height: 68).clipShape(RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 5) {
                 Text(podcast.title).font(.headline).lineLimit(2)
@@ -74,7 +74,7 @@ private struct AddPodcastView: View {
                     ForEach(results) { item in
                         Button { subscribe(item.feedUrl, artworkURL: URL(string: item.artworkUrl600 ?? "")) } label: {
                             HStack(spacing: 12) {
-                                AsyncImage(url: URL(string: item.artworkUrl600 ?? "")) { image in image.resizable().scaledToFill() } placeholder: { Color.secondary.opacity(0.12) }
+                                CachedArtworkImage(url: URL(string: item.artworkUrl600 ?? ""))
                                     .frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 9))
                                 VStack(alignment: .leading) {
                                     Text(item.collectionName).foregroundColor(.primary).font(.headline).lineLimit(2)

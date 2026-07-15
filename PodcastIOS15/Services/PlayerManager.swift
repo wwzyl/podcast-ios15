@@ -2,6 +2,14 @@ import AVFoundation
 import MediaPlayer
 import Foundation
 
+enum PlaybackRepeatMode: String, CaseIterable, Identifiable {
+    case off, one, queue
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .off: return "不循环"; case .one: return "单集循环"; case .queue: return "队列循环" }
+    }
+}
+
 @MainActor
 final class PlayerManager: ObservableObject {
     @Published private(set) var episode: Episode?
@@ -10,11 +18,18 @@ final class PlayerManager: ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var playbackStatus: String?
     @Published var rate: Float = 1 { didSet { if isPlaying { player.rate = rate } } }
-    @Published var repeatSegment: TranscriptSegment?
+    @Published var repeatSegment: TranscriptSegment? { didSet { completedSentenceRepeats = 0 } }
+    @Published var sentenceRepeatCount = 0
+    @Published private(set) var queue: [Episode] = []
+    @Published var repeatMode: PlaybackRepeatMode = .off
+    @Published private(set) var sleepTimerEnd: Date?
+    @Published private(set) var abStart: TimeInterval?
+    @Published private(set) var abEnd: TimeInterval?
 
     private let player = AVPlayer()
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var completedSentenceRepeats = 0
 
     init() {
         configureAudioSession()
@@ -25,7 +40,7 @@ final class PlayerManager: ObservableObject {
         }
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] _ in
             guard let manager = self else { return }
-            Task { @MainActor in manager.isPlaying = false }
+            Task { @MainActor in manager.handlePlaybackEnded() }
         }
     }
 
@@ -37,7 +52,11 @@ final class PlayerManager: ObservableObject {
     func load(_ episode: Episode, sourceURL: URL? = nil, autoPlay: Bool = true) {
         if self.episode?.id != episode.id {
             saveProgress()
+            repeatSegment = nil
+            clearABRepeat()
             self.episode = episode
+            currentTime = 0
+            duration = episode.duration ?? 0
             playbackStatus = "正在准备播放…"
             player.replaceCurrentItem(with: AVPlayerItem(url: sourceURL ?? episode.audioURL))
             let saved = UserDefaults.standard.double(forKey: progressKey(episode))
@@ -70,6 +89,38 @@ final class PlayerManager: ObservableObject {
     }
     func skip(_ delta: TimeInterval) { seek(to: currentTime + delta) }
 
+    func setQueue(_ episodes: [Episode], current: Episode) {
+        queue = episodes
+        if !queue.contains(where: { $0.id == current.id }) { queue.append(current) }
+    }
+
+    func playNext() {
+        guard let episode, let index = queue.firstIndex(where: { $0.id == episode.id }), index + 1 < queue.count else { return }
+        load(queue[index + 1])
+    }
+
+    func playPrevious() {
+        guard let episode, let index = queue.firstIndex(where: { $0.id == episode.id }), index > 0 else { return }
+        load(queue[index - 1])
+    }
+
+    func setSleepTimer(minutes: Int?) {
+        sleepTimerEnd = minutes.map { Date().addingTimeInterval(Double($0) * 60) }
+    }
+
+    func markABoundary() {
+        repeatSegment = nil
+        if abStart == nil || abEnd != nil {
+            abStart = currentTime
+            abEnd = nil
+        } else if let start = abStart, currentTime > start + 0.2 {
+            abEnd = currentTime
+            seek(to: start)
+        }
+    }
+
+    func clearABRepeat() { abStart = nil; abEnd = nil }
+
     private func tick(_ seconds: TimeInterval) {
         guard seconds.isFinite else { return }
         currentTime = seconds
@@ -80,7 +131,16 @@ final class PlayerManager: ObservableObject {
         case .paused: if isPlaying { playbackStatus = "正在准备播放…" }
         @unknown default: break
         }
-        if let segment = repeatSegment, let end = segment.end, seconds >= end { seek(to: segment.start) }
+        if let end = sleepTimerEnd, Date() >= end { setSleepTimer(minutes: nil); pause(); return }
+        if let start = abStart, let end = abEnd, seconds >= end { seek(to: start) }
+        if let segment = repeatSegment, let end = segment.end, seconds >= end {
+            completedSentenceRepeats += 1
+            if sentenceRepeatCount == 0 || completedSentenceRepeats < sentenceRepeatCount {
+                seek(to: segment.start)
+            } else {
+                repeatSegment = nil
+            }
+        }
         if Int(seconds) % 10 == 0 { saveProgress() }
     }
 
@@ -136,6 +196,24 @@ final class PlayerManager: ObservableObject {
             MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? rate : 0
         ]
+    }
+
+    private func handlePlaybackEnded() {
+        switch repeatMode {
+        case .one:
+            seek(to: 0); play()
+        case .queue:
+            guard let episode, let index = queue.firstIndex(where: { $0.id == episode.id }) else { isPlaying = false; return }
+            if index + 1 < queue.count { load(queue[index + 1]) }
+            else if let first = queue.first { load(first) }
+            else { isPlaying = false }
+        case .off:
+            if let episode, let index = queue.firstIndex(where: { $0.id == episode.id }), index + 1 < queue.count {
+                load(queue[index + 1])
+            } else {
+                isPlaying = false
+            }
+        }
     }
 
     private func progressKey(_ episode: Episode) -> String { "progress.\(episode.id)" }

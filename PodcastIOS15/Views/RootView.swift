@@ -39,7 +39,7 @@ private struct MiniPlayerView: View {
         HStack(spacing: 12) {
             Button(action: openPlayer) {
                 HStack(spacing: 12) {
-                    AsyncImage(url: episode.artworkURL) { image in image.resizable().scaledToFill() } placeholder: { Color.secondary.opacity(0.15) }
+                    CachedArtworkImage(url: episode.artworkURL)
                         .frame(width: 42, height: 42).clipShape(RoundedRectangle(cornerRadius: 7))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(episode.title).font(.subheadline.weight(.semibold)).lineLimit(1).foregroundColor(.primary)

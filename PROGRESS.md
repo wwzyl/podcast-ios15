@@ -230,4 +230,10 @@
 - [x] 98. 长按拖选松手提交前使用 `NLTokenizer` 扩展首尾 token，末端停在单词中间时自动补齐整个最后单词，并同步修正查词页内的二次选区。
 - [x] 99. 查词页原句改用具有 intrinsic content size 的不可滚动文本视图，按完整句子内容自动增高，不再固定在约两行高度。
 - [x] 100. GPT 开关开启后上下文词义只调用 GPT，不再用 `try?` 静默退回微软翻译；请求自动重试一次，仍失败则显示 GPT 错误，成功结果明确标注“GPT 上下文释义”。
-- [ ] 101. 通过 GitHub Actions Xcode 15.4 编译 1.6.3（13），仅下载并校验 IPA，不执行手机安装。
+- [x] 101. GitHub Actions `29493313806` 已通过 Xcode 15.4 Release 编译和 IPA 打包；仅下载并校验产物，未执行手机安装。包内确认为 1.6.3（13）、最低 iOS 15.0。
+
+### 1.6.3 构建产物
+
+- 本地 IPA：`D:\codex\aisten\PodcastIOS15-1.6.3-build13\PodcastIOS15-iOS15.ipa`
+- Artifact 备份：`D:\codex\aisten\PodcastIOS15-1.6.3-build13-artifact.zip`
+- IPA SHA-256：`4659EEF2F2BB2CD41796FB505F179318172B647E4F5BED179B3FE127832AB300`

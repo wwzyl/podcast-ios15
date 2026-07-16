@@ -35,7 +35,6 @@ private struct PlayerContentView: View {
     @State private var followPlayback = true
     @State private var searchText = ""
     @State private var bookmarkedTexts: Set<String> = []
-    @State private var showingOnlyBookmarks = false
     @State private var currentSentenceFrame: CGRect?
     @State private var transcriptViewportHeight: CGFloat = 0
 
@@ -47,8 +46,7 @@ private struct PlayerContentView: View {
     private var visibleIndices: [Int] {
         segments.indices.filter { index in
             let matchesSearch = searchText.isEmpty || segments[index].text.localizedCaseInsensitiveContains(searchText)
-            let matchesBookmark = !showingOnlyBookmarks || bookmarkedTexts.contains(segments[index].text)
-            return matchesSearch && matchesBookmark
+            return searchText.isEmpty || segments[index].text.localizedCaseInsensitiveContains(searchText)
         }
     }
 
@@ -80,11 +78,7 @@ private struct PlayerContentView: View {
                                                  },
                                                  favorite: { saveSentence(segment) },
                                                  bookmarked: bookmarkedTexts.contains(segment.text),
-                                                 toggleBookmark: { toggleBookmark(segment) },
-                                                 repeatLine: {
-                                                     player.clearABRepeat()
-                                                     player.repeatSegment = player.repeatSegment?.id == segment.id ? nil : segment
-                                                 })
+                                                 toggleBookmark: { toggleBookmark(segment) })
                                         .id(segment.id)
                                         .background(GeometryReader { geometry in
                                             Color.clear.preference(key: CurrentSentenceFramePreferenceKey.self,
@@ -129,28 +123,26 @@ private struct PlayerContentView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Button { followPlayback.toggle() } label: { Label(followPlayback ? "停止跟随文本" : "跟随播放位置", systemImage: followPlayback ? "location.fill" : "location") }
-                    Button { showingOnlyBookmarks.toggle() } label: { Label(showingOnlyBookmarks ? "显示全部句子" : "只看书签", systemImage: showingOnlyBookmarks ? "text.justify" : "bookmark.fill") }
                     Menu("调整字幕时间轴") {
                         Button("整体提前 0.5 秒") { shiftTranscript(by: -0.5) }
                         Button("整体延后 0.5 秒") { shiftTranscript(by: 0.5) }
                     }
                     Button { translateAll() } label: { Label("翻译全文", systemImage: "character.bubble") }.disabled(translatingAll || segments.isEmpty)
-                    Button { transcribeAudio() } label: { Label("用 Whisper 重新转写", systemImage: "waveform") }.disabled(transcription.state(for: episode).isRunning)
-                    Button { retranscribeFromCurrent() } label: { Label("从当前位置重新转写", systemImage: "waveform.path.badge.minus") }.disabled(transcription.state(for: episode).isRunning)
+                    Menu("从头重新转写") {
+                        Button("使用 Scribe v2") { transcribeAudio(using: .scribe) }
+                        Button("使用 Whisper") { transcribeAudio(using: .whisper) }
+                    }.disabled(transcription.state(for: episode).isRunning)
+                    Menu("从当前位置重新转写") {
+                        Button("使用 Scribe v2") { retranscribeFromCurrent(using: .scribe) }
+                        Button("使用 Whisper") { retranscribeFromCurrent(using: .whisper) }
+                    }.disabled(transcription.state(for: episode).isRunning)
                     Divider()
                     Button { player.playPrevious() } label: { Label("播放上一集", systemImage: "backward.end") }
                     Button { player.playNext() } label: { Label("播放下一集", systemImage: "forward.end") }
-                    Menu("循环模式") {
-                        ForEach(PlaybackRepeatMode.allCases) { mode in
-                            Button { player.repeatMode = mode } label: { Label(mode.title, systemImage: player.repeatMode == mode ? "checkmark" : "circle") }
-                        }
-                    }
                     Menu("睡眠定时") {
                         ForEach([10, 20, 30, 45, 60], id: \.self) { minutes in Button("\(minutes) 分钟") { player.setSleepTimer(minutes: minutes) } }
                         Button("关闭定时") { player.setSleepTimer(minutes: nil) }
                     }
-                    Button { player.markABoundary() } label: { Label(player.abStart == nil ? "设置 A 点" : (player.abEnd == nil ? "设置 B 点" : "重新设置 A 点"), systemImage: "repeat") }
-                    if player.abStart != nil { Button("清除 AB 重复", role: .destructive) { player.clearABRepeat() } }
                     Button { store.importedTranscript = nil; loadTranscript() } label: { Label("重新载入文本", systemImage: "arrow.clockwise") }
                 } label: { if translatingAll { ProgressView() } else { Image(systemName: "ellipsis.circle") } }
             }
@@ -180,18 +172,18 @@ private struct PlayerContentView: View {
         VStack(spacing: 15) {
             Image(systemName: "captions.bubble").font(.system(size: 55)).foregroundColor(AppTheme.purple)
             Text("这一集没有附带逐句文本").font(.title3.bold())
-            Text("下载完成后会自动使用离线 Whisper 生成逐句稿；失败时可以从最后断点继续。")
+            Text("下载完成后会自动识别语言并使用 Scribe v2 生成逐句稿；失败后可断点重试或改用离线 Whisper。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
             if transcription.state(for: episode).isRunning {
                 VStack(spacing: 8) {
                     ProgressView(value: transcription.state(for: episode).progress)
-                    Text("Whisper 正在后台转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
+                    Text("\(transcription.state(for: episode).engine.title) 正在转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
                         .font(.caption).foregroundColor(.secondary)
                 }
             } else if transcription.state(for: episode).errorMessage != nil {
                 EmptyView()
             } else {
-                Button("使用 Whisper 生成逐句稿") { transcribeAudio() }.buttonStyle(.borderedProminent)
+                Button("使用 Scribe v2 生成逐句稿") { transcribeAudio(using: .scribe) }.buttonStyle(.borderedProminent)
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -219,16 +211,18 @@ private struct PlayerContentView: View {
         case .ready:
             if transcription.state(for: episode).isRunning {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Whisper 正在后台转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
+                    Text("\(transcription.state(for: episode).engine.title) 正在转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
                     ProgressView(value: transcription.state(for: episode).progress)
                 }.padding(.horizontal, 16).padding(.vertical, 8).background(AppTheme.purple.opacity(0.09))
             } else if let message = transcription.state(for: episode).errorMessage {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("Whisper 转录失败：\(message)", systemImage: "exclamationmark.triangle")
+                    Label("\(transcription.state(for: episode).engine.title) 转录失败：\(message)", systemImage: "exclamationmark.triangle")
                         .font(.caption).fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Button("从断点重试 Whisper") { retryTranscription() }
+                        Button("重试 Scribe") { retryTranscription(using: .scribe) }
                             .buttonStyle(.borderedProminent)
+                        Button("改用 Whisper") { retryTranscription(using: .whisper) }
+                            .buttonStyle(.bordered)
                     }
                 }
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -282,22 +276,22 @@ private struct PlayerContentView: View {
         }
     }
 
-    private func transcribeAudio() {
+    private func transcribeAudio(using engine: TranscriptionEngine) {
         loadingText = false
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
                 segments = []
-                transcription.restart(episode: episode, audioURL: audioURL)
+                transcription.restart(episode: episode, audioURL: audioURL, engine: engine)
             } catch { errorText = error.localizedDescription }
         }
     }
 
-    private func retryTranscription() {
+    private func retryTranscription(using engine: TranscriptionEngine) {
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
-                transcription.retry(episode: episode, audioURL: audioURL)
+                transcription.retry(episode: episode, audioURL: audioURL, engine: engine)
             } catch { errorText = "重试转录失败：\(error.localizedDescription)" }
         }
     }
@@ -311,11 +305,11 @@ private struct PlayerContentView: View {
         }
     }
 
-    private func retranscribeFromCurrent() {
+    private func retranscribeFromCurrent(using engine: TranscriptionEngine) {
         Task {
             do {
                 let audioURL = try await downloads.download(episode)
-                transcription.retranscribe(episode: episode, audioURL: audioURL, from: player.currentTime)
+                transcription.retranscribe(episode: episode, audioURL: audioURL, from: player.currentTime, engine: engine)
             } catch { errorText = "重新转录失败：\(error.localizedDescription)" }
         }
     }
@@ -408,7 +402,6 @@ private struct SentenceRow: View {
     let favorite: () -> Void
     let bookmarked: Bool
     let toggleBookmark: () -> Void
-    let repeatLine: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -420,7 +413,6 @@ private struct SentenceRow: View {
                     Button { learn("") } label: { Label("查词并加入生词", systemImage: "text.magnifyingglass") }
                     Button(action: favorite) { Label("收藏句子", systemImage: "bookmark") }
                     Button(action: toggleBookmark) { Label(bookmarked ? "移除书签" : "添加书签", systemImage: bookmarked ? "bookmark.slash" : "bookmark.fill") }
-                    Button(action: repeatLine) { Label("循环这一句", systemImage: "repeat.1") }
                     Button(action: seek) { Label("从这里播放", systemImage: "play") }
                 } label: { Image(systemName: bookmarked ? "bookmark.fill" : "ellipsis").foregroundColor(bookmarked ? AppTheme.purple : .secondary).frame(width: 34, height: 28) }
             }
@@ -461,18 +453,7 @@ private struct FullPlayerControls: View {
                 Spacer()
                 Button { player.skip(15) } label: { Image(systemName: "goforward.15") }
                 Spacer()
-                Menu {
-                    Button("取消逐句循环") { player.repeatSegment = nil }
-                    ForEach([1, 2, 3, 5, 0], id: \.self) { count in
-                        Button(count == 0 ? "一直重复" : "重复 \(count) 次") { player.sentenceRepeatCount = count }
-                    }
-                    Divider()
-                    Button("上一集") { player.playPrevious() }
-                    Button("下一集") { player.playNext() }
-                } label: {
-                    Image(systemName: player.repeatSegment == nil ? "repeat" : "repeat.1").frame(width: 48)
-                }
-                .foregroundColor(player.repeatSegment == nil ? .secondary : AppTheme.purple)
+                Button { player.playNext() } label: { Image(systemName: "forward.end.fill").frame(width: 48) }
             }.font(.title2).foregroundColor(AppTheme.purple)
         }
         .padding(.horizontal, 18).padding(.top, 5).padding(.bottom, 5)

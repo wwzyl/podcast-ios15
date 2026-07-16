@@ -2,17 +2,31 @@ import Foundation
 import Combine
 import UIKit
 
+enum TranscriptionEngine: String, CaseIterable {
+    case scribe
+    case whisper
+
+    var title: String {
+        switch self {
+        case .scribe: return "Scribe v2"
+        case .whisper: return "Whisper"
+        }
+    }
+}
+
 struct TranscriptionJobState {
     var segments: [TranscriptSegment]
     var progress: Double
     var isRunning: Bool
     var isComplete: Bool
     var errorMessage: String?
+    var engine: TranscriptionEngine
 
-    static let idle = TranscriptionJobState(segments: [], progress: 0, isRunning: false, isComplete: false, errorMessage: nil)
+    static let idle = TranscriptionJobState(segments: [], progress: 0, isRunning: false,
+                                            isComplete: false, errorMessage: nil, engine: .scribe)
 }
 
-/// 由 App 根节点持有，离开播放页或切换标签不会取消正在进行的 Whisper 转录。
+/// App-root-owned transcription jobs survive navigation away from the player.
 @MainActor
 final class TranscriptionManager: ObservableObject {
     @Published private(set) var jobs: [String: TranscriptionJobState] = [:]
@@ -24,44 +38,58 @@ final class TranscriptionManager: ObservableObject {
         if let state = jobs[episode.id] { return state }
         let cached = TranscriptCache.load(episodeID: episode.id) ?? []
         let complete = TranscriptCache.isComplete(episodeID: episode.id)
-        return TranscriptionJobState(segments: cached,
-                                     progress: complete ? 1 : 0,
-                                     isRunning: false,
-                                     isComplete: complete,
-                                     errorMessage: nil)
+        return TranscriptionJobState(segments: cached, progress: complete ? 1 : 0,
+                                     isRunning: false, isComplete: complete,
+                                     errorMessage: nil, engine: .scribe)
     }
 
-    func start(episode: Episode, audioURL: URL, force: Bool = false) {
+    func start(episode: Episode, audioURL: URL, engine: TranscriptionEngine = .scribe, force: Bool = false) {
         if tasks[episode.id] != nil { return }
         if !force, TranscriptCache.isComplete(episodeID: episode.id), let cached = TranscriptCache.load(episodeID: episode.id) {
-            jobs[episode.id] = TranscriptionJobState(segments: cached, progress: 1, isRunning: false, isComplete: true, errorMessage: nil)
+            jobs[episode.id] = TranscriptionJobState(segments: cached, progress: 1, isRunning: false,
+                                                     isComplete: true, errorMessage: nil, engine: engine)
             return
         }
-        if force { TranscriptCache.clear(episodeID: episode.id) }
+        if force {
+            TranscriptCache.clear(episodeID: episode.id)
+            ScribeTranscriber.shared.clearCache(episodeID: episode.id)
+        }
         let existing = force ? [] : (TranscriptCache.load(episodeID: episode.id) ?? [])
-        jobs[episode.id] = TranscriptionJobState(segments: existing, progress: 0, isRunning: true, isComplete: false, errorMessage: nil)
-        beginBackgroundExecution(for: episode.id)
+        jobs[episode.id] = TranscriptionJobState(segments: existing, progress: 0, isRunning: true,
+                                                 isComplete: false, errorMessage: nil, engine: engine)
+        beginBackgroundExecution(for: episode.id, engine: engine)
         let generation = UUID()
         generations[episode.id] = generation
         tasks[episode.id] = Task { [weak self] in
             guard let self else { return }
             do {
-                let stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
+                let stream: AsyncThrowingStream<TranscriptionBatch, Error>
+                switch engine {
+                case .scribe:
+                    stream = await ScribeTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
+                case .whisper:
+                    stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
+                }
                 for try await batch in stream {
                     guard self.generations[episode.id] == generation else { return }
                     var state = self.jobs[episode.id] ?? .idle
-                    state.segments.append(contentsOf: batch.segments)
+                    if batch.replacesExisting { state.segments = batch.segments }
+                    else { state.segments.append(contentsOf: batch.segments) }
                     state.progress = batch.progress
                     state.isRunning = true
+                    state.isComplete = false
                     state.errorMessage = nil
+                    state.engine = engine
                     self.jobs[episode.id] = state
                 }
                 guard self.generations[episode.id] == generation else { return }
                 var state = self.jobs[episode.id] ?? .idle
+                state.segments = TranscriptCache.load(episodeID: episode.id) ?? state.segments
                 state.progress = 1
                 state.isRunning = false
                 state.isComplete = true
                 state.errorMessage = nil
+                state.engine = engine
                 self.jobs[episode.id] = state
             } catch is CancellationError {
                 guard self.generations[episode.id] == generation else { return }
@@ -71,8 +99,11 @@ final class TranscriptionManager: ObservableObject {
             } catch {
                 guard self.generations[episode.id] == generation else { return }
                 var state = self.jobs[episode.id] ?? .idle
+                state.segments = TranscriptCache.load(episodeID: episode.id) ?? state.segments
                 state.isRunning = false
+                state.isComplete = false
                 state.errorMessage = error.localizedDescription
+                state.engine = engine
                 self.jobs[episode.id] = state
             }
             if self.generations[episode.id] == generation {
@@ -83,26 +114,25 @@ final class TranscriptionManager: ObservableObject {
         }
     }
 
-    /// 保留已完成句子，从最后断点继续 Whisper。
-    func retry(episode: Episode, audioURL: URL) {
+    func retry(episode: Episode, audioURL: URL, engine: TranscriptionEngine = .scribe) {
         cancelCurrentTask(for: episode.id)
-        start(episode: episode, audioURL: audioURL)
+        start(episode: episode, audioURL: audioURL, engine: engine)
     }
 
-    /// 清除旧文稿，从头进行 Whisper 转录。
-    func restart(episode: Episode, audioURL: URL) {
+    func restart(episode: Episode, audioURL: URL, engine: TranscriptionEngine) {
         cancelCurrentTask(for: episode.id)
-        start(episode: episode, audioURL: audioURL, force: true)
+        start(episode: episode, audioURL: audioURL, engine: engine, force: true)
     }
 
-    func retranscribe(episode: Episode, audioURL: URL, from time: TimeInterval) {
+    func retranscribe(episode: Episode, audioURL: URL, from time: TimeInterval, engine: TranscriptionEngine = .scribe) {
         cancelCurrentTask(for: episode.id)
+        ScribeTranscriber.shared.clearCache(episodeID: episode.id)
         let retained = (TranscriptCache.load(episodeID: episode.id) ?? []).filter {
             ($0.end ?? $0.start) <= max(0, time)
         }
         try? TranscriptCache.savePartial(retained, episodeID: episode.id)
         try? TranscriptCache.setResumeTime(time, episodeID: episode.id)
-        start(episode: episode, audioURL: audioURL)
+        start(episode: episode, audioURL: audioURL, engine: engine)
     }
 
     private func cancelCurrentTask(for episodeID: String) {
@@ -110,13 +140,10 @@ final class TranscriptionManager: ObservableObject {
         tasks.removeValue(forKey: episodeID)?.cancel()
     }
 
-    private func beginBackgroundExecution(for episodeID: String) {
+    private func beginBackgroundExecution(for episodeID: String, engine: TranscriptionEngine) {
         guard backgroundTasks[episodeID] == nil else { return }
-        let identifier = UIApplication.shared.beginBackgroundTask(withName: "Whisper-\(episodeID)") { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.endBackgroundExecution(for: episodeID)
-            }
+        let identifier = UIApplication.shared.beginBackgroundTask(withName: "\(engine.title)-\(episodeID)") { [weak self] in
+            Task { @MainActor in self?.endBackgroundExecution(for: episodeID) }
         }
         if identifier != .invalid { backgroundTasks[episodeID] = identifier }
     }

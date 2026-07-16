@@ -19,6 +19,13 @@ enum WhisperTranscriptionError: LocalizedError {
 struct TranscriptionBatch {
     let segments: [TranscriptSegment]
     let progress: Double
+    let replacesExisting: Bool
+
+    init(segments: [TranscriptSegment], progress: Double, replacesExisting: Bool = false) {
+        self.segments = segments
+        self.progress = progress
+        self.replacesExisting = replacesExisting
+    }
 }
 
 actor WhisperTranscriber {

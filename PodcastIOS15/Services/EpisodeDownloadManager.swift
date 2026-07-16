@@ -314,6 +314,12 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
                 try FileManager.default.removeItem(at: destination)
             }
             try FileManager.default.moveItem(at: staging, to: destination)
+            try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                                   ofItemAtPath: destination.path)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var persistedURL = destination
+            try? persistedURL.setResourceValues(values)
             movedURLs[downloadTask.taskIdentifier] = destination
         } catch {
             try? FileManager.default.removeItem(at: staging)
@@ -322,7 +328,10 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
     }
 
     private func copyDownloadedFile(from source: URL, to destination: URL) throws {
-        _ = FileManager.default.createFile(atPath: destination.path, contents: nil)
+        guard FileManager.default.createFile(atPath: destination.path, contents: nil,
+                                             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]) else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
         let input = try FileHandle(forReadingFrom: source)
         let output = try FileHandle(forWritingTo: destination)
         defer {

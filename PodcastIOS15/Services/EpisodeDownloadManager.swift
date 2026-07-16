@@ -168,7 +168,7 @@ final class EpisodeDownloadManager: ObservableObject {
         var request = URLRequest(url: episode.audioURL)
         request.timeoutInterval = 60 * 60
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("PodcastIOS15/1.6.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("PodcastIOS15/1.6.3", forHTTPHeaderField: "User-Agent")
 
         let downloader = StreamingAudioDownloader(destination: destination) { [weak self] received, total in
             Task { @MainActor in

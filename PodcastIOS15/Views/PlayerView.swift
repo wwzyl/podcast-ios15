@@ -492,6 +492,7 @@ private struct WordLearningView: View {
     @State private var definition = ""
     @State private var translation = ""
     @State private var sentenceTranslation = ""
+    @State private var contextMeaningSource = ""
     @State private var frequency: WordFrequency?
     @State private var loading = false
     @State private var showSystemDictionary = false
@@ -515,6 +516,7 @@ private struct WordLearningView: View {
                         phonetic = ""
                         definition = ""
                         translation = ""
+                        contextMeaningSource = ""
                         frequency = nil
                     }
                     .frame(minHeight: 80)
@@ -538,7 +540,8 @@ private struct WordLearningView: View {
                     }
 
                     if !translation.isEmpty {
-                        resultCard(title: "在这里的意思", systemImage: "sparkles", color: AppTheme.purple) {
+                        resultCard(title: contextMeaningSource.isEmpty ? "在这里的意思" : contextMeaningSource,
+                                   systemImage: "sparkles", color: AppTheme.purple) {
                             Text(translation).font(.title3.weight(.semibold)).foregroundColor(AppTheme.purple)
                         }
                     }
@@ -600,28 +603,40 @@ private struct WordLearningView: View {
         let selected = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selected.isEmpty else { return }
         loading = true
+        translation = ""
+        contextMeaningSource = ""
+        errorText = nil
         Task {
             let result = try? await DictionaryService().lookup(selected)
             let resolvedSentenceTranslation = sentenceTranslation.isEmpty
                 ? ((try? await MicrosoftTranslator.shared.translate(request.segment.text, to: store.targetLanguage)) ?? "")
                 : sentenceTranslation
-            let translatedWord = try? await ContextDefinitionService().meaning(
-                of: selected,
-                previous: request.previous,
-                sentence: request.segment.text,
-                next: request.next,
-                dictionary: result,
-                targetLanguage: store.targetLanguage,
-                configuration: ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
-                                                              baseURL: store.contextGPTBaseURL,
-                                                              apiKey: store.contextGPTAPIKey,
-                                                              model: store.contextGPTModel))
+            let configuration = ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
+                                                               baseURL: store.contextGPTBaseURL,
+                                                               apiKey: store.contextGPTAPIKey,
+                                                               model: store.contextGPTModel)
+            var translatedWord: String?
+            do {
+                translatedWord = try await ContextDefinitionService().meaning(
+                    of: selected,
+                    previous: request.previous,
+                    sentence: request.segment.text,
+                    next: request.next,
+                    dictionary: result,
+                    targetLanguage: store.targetLanguage,
+                    configuration: configuration)
+                contextMeaningSource = configuration.enabled ? "GPT 上下文释义" : "上下文释义"
+            } catch {
+                errorText = error.localizedDescription
+            }
             phonetic = result?.phonetic ?? ""
             definition = result?.definition ?? ""
             translation = translatedWord ?? ""
             sentenceTranslation = resolvedSentenceTranslation
             frequency = WordFrequencyService().lookup(selected)
-            if result == nil && translatedWord == nil { errorText = "未查询到结果，请检查网络或换用系统词典。" }
+            if result == nil && translatedWord == nil && errorText == nil {
+                errorText = "未查询到结果，请检查网络或换用系统词典。"
+            }
             loading = false
         }
     }
@@ -694,7 +709,7 @@ private struct SelectableSentenceView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onSelection: onSelection) }
 
     func makeUIView(context: Context) -> UITextView {
-        let view = UITextView()
+        let view = LookupSentenceTextView()
         context.coordinator.textView = view
         view.delegate = context.coordinator
         view.text = text
@@ -706,6 +721,7 @@ private struct SelectableSentenceView: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         view.textContainer.lineFragmentPadding = 0
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.required, for: .vertical)
         let selectionPress = UILongPressGestureRecognizer(target: context.coordinator,
                                                            action: #selector(Coordinator.selectionGestureEnded(_:)))
         selectionPress.minimumPressDuration = 0.35
@@ -717,6 +733,7 @@ private struct SelectableSentenceView: UIViewRepresentable {
 
     func updateUIView(_ uiView: UITextView, context: Context) {
         if uiView.text != text { uiView.text = text }
+        uiView.invalidateIntrinsicContentSize()
         context.coordinator.onSelection = onSelection
     }
 
@@ -742,7 +759,7 @@ private struct SelectableSentenceView: UIViewRepresentable {
                 guard let self, let textView else { return }
                 let range = textView.selectedRange
                 guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return }
-                let current = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+                let current = TranscriptSelection.expandedValue(in: textView) ?? ""
                 let value = current.isEmpty ? self.pendingValue : current
                 guard let value, !value.isEmpty else { return }
                 self.pendingValue = nil
@@ -752,5 +769,22 @@ private struct SelectableSentenceView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
+    }
+}
+
+private final class LookupSentenceTextView: UITextView {
+    private var lastWidth: CGFloat = 0
+
+    override var intrinsicContentSize: CGSize {
+        guard bounds.width > 0 else { return CGSize(width: UIView.noIntrinsicMetric, height: 80) }
+        return sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude))
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if abs(bounds.width - lastWidth) > 0.5 {
+            lastWidth = bounds.width
+            invalidateIntrinsicContentSize()
+        }
     }
 }

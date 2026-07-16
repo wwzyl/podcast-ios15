@@ -7,6 +7,18 @@ struct ContextDefinitionConfiguration {
     let model: String
 }
 
+enum ContextDefinitionError: LocalizedError {
+    case missingAPIKey
+    case gptRequestFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingAPIKey: return "已启用 GPT 上下文释义，但 API Key 为空"
+        case .gptRequestFailed(let message): return "GPT 上下文释义失败：\(message)"
+        }
+    }
+}
+
 struct ContextDefinitionService {
     func meaning(of selection: String,
                  previous: String?,
@@ -15,10 +27,13 @@ struct ContextDefinitionService {
                  dictionary: DictionaryResult?,
                  targetLanguage: String,
                  configuration: ContextDefinitionConfiguration) async throws -> String {
-        if configuration.enabled, !configuration.apiKey.isEmpty {
-            if let value = try? await gptMeaning(of: selection, previous: previous, sentence: sentence, next: next, targetLanguage: targetLanguage, configuration: configuration) {
-                return value
+        if configuration.enabled {
+            guard !configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ContextDefinitionError.missingAPIKey
             }
+            return try await gptMeaningWithRetry(of: selection, previous: previous, sentence: sentence,
+                                                 next: next, targetLanguage: targetLanguage,
+                                                 configuration: configuration)
         }
 
         let direct = try await MicrosoftTranslator.shared.translate(selection, to: targetLanguage)
@@ -27,6 +42,27 @@ struct ContextDefinitionService {
         }
         let explanation = try await MicrosoftTranslator.shared.translate(sense.definition, to: targetLanguage)
         return explanation.isEmpty ? direct : "\(direct)\n\(explanation)"
+    }
+
+    private func gptMeaningWithRetry(of selection: String,
+                                     previous: String?,
+                                     sentence: String,
+                                     next: String?,
+                                     targetLanguage: String,
+                                     configuration: ContextDefinitionConfiguration) async throws -> String {
+        var lastError: Error = URLError(.unknown)
+        for attempt in 0..<2 {
+            do {
+                return try await gptMeaning(of: selection, previous: previous, sentence: sentence,
+                                            next: next, targetLanguage: targetLanguage,
+                                            configuration: configuration)
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                lastError = error
+                if attempt == 0 { try await Task.sleep(nanoseconds: 700_000_000) }
+            }
+        }
+        throw ContextDefinitionError.gptRequestFailed(lastError.localizedDescription)
     }
 
     private func gptMeaning(of selection: String,

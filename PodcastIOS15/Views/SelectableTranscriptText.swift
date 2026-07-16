@@ -1,5 +1,36 @@
 import SwiftUI
 import UIKit
+import NaturalLanguage
+
+enum TranscriptSelection {
+    static func expandedRange(in text: String, selectedRange: NSRange) -> NSRange {
+        guard selectedRange.length > 0,
+              NSMaxRange(selectedRange) <= (text as NSString).length,
+              Range(selectedRange, in: text) != nil else { return selectedRange }
+
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = text
+        var tokenUnion: NSRange?
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { tokenRange, _ in
+            let token = NSRange(tokenRange, in: text)
+            guard NSIntersectionRange(token, selectedRange).length > 0 else { return true }
+            tokenUnion = tokenUnion.map { NSUnionRange($0, token) } ?? token
+            return true
+        }
+        guard let tokenUnion else { return selectedRange }
+        let lower = min(selectedRange.location, tokenUnion.location)
+        let upper = max(NSMaxRange(selectedRange), NSMaxRange(tokenUnion))
+        return NSRange(location: lower, length: upper - lower)
+    }
+
+    static func expandedValue(in textView: UITextView) -> String? {
+        let range = expandedRange(in: textView.text, selectedRange: textView.selectedRange)
+        guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return nil }
+        textView.selectedRange = range
+        let value = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
 
 /// 原生文本选择：长按单词或拖动选择词组后直接打开释义面板。
 struct SelectableTranscriptText: UIViewRepresentable {
@@ -89,7 +120,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
             let range = textView.selectedRange
             guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return }
             guard let pendingSelection = pendingValue else { return }
-            let current = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+            let current = TranscriptSelection.expandedValue(in: textView) ?? ""
             let value = current.isEmpty ? pendingSelection : current
             guard !value.isEmpty else { return }
             pendingValue = nil

@@ -208,4 +208,11 @@
 - [x] 88. 整集音频恢复为 `URLSessionDataTask` 流式写入当前 Caches 的隐藏 `.partial` 文件，完成后只在同一目录原子改名，不再读取、复制或移动 `CFNetworkDownload.tmp`。
 - [x] 89. App 启动时接管并取消旧 session identifier 下的遗留后台任务，旧任务即使回调也直接丢弃临时文件，不再尝试写入失效的 `EpisodeAudio` 或旧沙盒路径。
 - [x] 90. 保留稳定 episode id 文件名和扩展名回退查找；转录失败只影响转录缓存，完整音频继续保留，退出后再次进入不会重复下载。
-- [ ] 91. 通过 GitHub Actions Xcode 15.4 编译 1.6.1（11），下载 IPA 后进行真机“下载成功、转录失败、退出重进不重复下载”验证。
+- [x] 91. GitHub Actions `29472450548` 已通过 Xcode 15.4 Release 编译、IPA 打包和 Artifact 上传；包内确认为 1.6.1（11）、最低 iOS 15.0，内置 Whisper 模型完整。
+- [ ] 92. 真机进行“下载成功、转录失败、退出重进不重复下载”验证，并确认升级后不再出现 `CFNetworkDownload.tmp` 目录权限错误。
+
+### 1.6.1 构建产物
+
+- 本地 IPA：`D:\codex\aisten\PodcastIOS15-1.6.1-build11\PodcastIOS15-iOS15.ipa`
+- Artifact 备份：`D:\codex\aisten\PodcastIOS15-1.6.1-build11-artifact.zip`
+- IPA SHA-256：`A6843E0586A47F33E99CD9994991BF48D1939564D7587AA62CCEBA19DAAFD945`

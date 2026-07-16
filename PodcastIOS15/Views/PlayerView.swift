@@ -5,6 +5,7 @@ struct PlayerView: View {
     @EnvironmentObject private var player: PlayerManager
     let episode: Episode
     @State private var activeEpisode: Episode
+    @State private var isBoundToRequestedEpisode = false
 
     init(episode: Episode) {
         self.episode = episode
@@ -15,7 +16,13 @@ struct PlayerView: View {
         PlayerContentView(episode: activeEpisode)
             .id(activeEpisode.id)
             .onReceive(player.$episode) { value in
-                if let value { activeEpisode = value }
+                guard let value else { return }
+                if value.id == episode.id {
+                    isBoundToRequestedEpisode = true
+                    activeEpisode = value
+                } else if isBoundToRequestedEpisode {
+                    activeEpisode = value
+                }
             }
     }
 }
@@ -45,13 +52,13 @@ private struct PlayerContentView: View {
 
     private var visibleIndices: [Int] {
         segments.indices.filter { index in
-            let matchesSearch = searchText.isEmpty || segments[index].text.localizedCaseInsensitiveContains(searchText)
             return searchText.isEmpty || segments[index].text.localizedCaseInsensitiveContains(searchText)
         }
     }
 
     private var currentSentenceIsVisible: Bool {
-        guard let frame = currentSentenceFrame, transcriptViewportHeight > 0 else { return true }
+        guard transcriptViewportHeight > 0 else { return true }
+        guard let frame = currentSentenceFrame else { return false }
         return frame.maxY > 0 && frame.minY < transcriptViewportHeight
     }
 
@@ -89,13 +96,18 @@ private struct PlayerContentView: View {
                             .padding(.horizontal, 18).padding(.bottom, 16)
                         }
                         .coordinateSpace(name: "transcriptScroll")
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 6).onChanged { _ in
+                                if followPlayback { followPlayback = false }
+                            }
+                        )
                         .background(GeometryReader { geometry in
                             Color.clear.preference(key: TranscriptViewportHeightPreferenceKey.self, value: geometry.size.height)
                         })
                         .onPreferenceChange(CurrentSentenceFramePreferenceKey.self) { currentSentenceFrame = $0 }
                         .onPreferenceChange(TranscriptViewportHeightPreferenceKey.self) { transcriptViewportHeight = $0 }
                         .overlay(alignment: .bottomTrailing) {
-                            if !currentSentenceIsVisible {
+                            if !followPlayback || !currentSentenceIsVisible {
                                 Button {
                                     followPlayback = true
                                     if let index = currentIndex, segments.indices.contains(index) {
@@ -683,6 +695,7 @@ private struct SelectableSentenceView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
+        context.coordinator.textView = view
         view.delegate = context.coordinator
         view.text = text
         view.font = UIFont.systemFont(ofSize: 20)
@@ -693,6 +706,12 @@ private struct SelectableSentenceView: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         view.textContainer.lineFragmentPadding = 0
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let selectionPress = UILongPressGestureRecognizer(target: context.coordinator,
+                                                           action: #selector(Coordinator.selectionGestureEnded(_:)))
+        selectionPress.minimumPressDuration = 0.35
+        selectionPress.cancelsTouchesInView = false
+        selectionPress.delegate = context.coordinator
+        view.addGestureRecognizer(selectionPress)
         return view
     }
 
@@ -701,15 +720,37 @@ private struct SelectableSentenceView: UIViewRepresentable {
         context.coordinator.onSelection = onSelection
     }
 
-    final class Coordinator: NSObject, UITextViewDelegate {
+    final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate {
         var onSelection: (String) -> Void
+        weak var textView: UITextView?
+        private var pendingValue: String?
         init(onSelection: @escaping (String) -> Void) { self.onSelection = onSelection }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
             let range = textView.selectedRange
-            guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return }
+            guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else {
+                pendingValue = nil
+                return
+            }
             let value = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty { onSelection(value) }
+            pendingValue = value.isEmpty ? nil : value
         }
+
+        @objc func selectionGestureEnded(_ gesture: UILongPressGestureRecognizer) {
+            guard gesture.state == .ended, let textView else { return }
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                let range = textView.selectedRange
+                guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return }
+                let current = (textView.text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+                let value = current.isEmpty ? self.pendingValue : current
+                guard let value, !value.isEmpty else { return }
+                self.pendingValue = nil
+                self.onSelection(value)
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
     }
 }

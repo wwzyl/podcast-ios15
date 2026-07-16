@@ -30,20 +30,23 @@ struct ScribeWordToken: Codable, Hashable {
     }
 }
 
-/// Native port of scribe2srt's punctuation, sentence splitting, intelligent
-/// merging, and final timing stages. Complete sentences are preferred; a
-/// sentence is split internally only when it exceeds subtitle safety limits.
+/// Paragraph segmentation matching Aisten's transcript-oriented behavior.
+/// Full sentences are preferred; subtitle line-count and seven-second limits
+/// must not create timeline boundaries inside normal spoken sentences.
 enum ScribeSubtitleProcessor {
     struct Settings {
-        let minimumDuration: TimeInterval = 0.83
-        let maximumDuration: TimeInterval = 7
+        let minimumDuration: TimeInterval = 0.35
+        let targetParagraphDuration: TimeInterval = 3.2
+        let preferredMaximumDuration: TimeInterval = 14
+        let maximumDuration: TimeInterval = 30
         let minimumGap: TimeInterval = 0.083
         let cjkCPS: Double = 11
         let latinCPS: Double = 15
-        let cjkCharactersPerLine = 25
-        let latinCharactersPerLine = 42
-        let maximumLines = 2
+        let cjkMaximumCharacters = 360
+        let latinMaximumCharacters = 520
         let semanticPause: TimeInterval = 1.8
+        let naturalSplitPause: TimeInterval = 0.35
+        let maximumMergeGap: TimeInterval = 0.9
     }
 
     private struct TimedWord: Hashable {
@@ -51,6 +54,7 @@ enum ScribeSubtitleProcessor {
         var start: TimeInterval
         var end: TimeInterval
         var type: String
+        var speakerID: String?
     }
 
     private struct Entry {
@@ -59,6 +63,7 @@ enum ScribeSubtitleProcessor {
         var end: TimeInterval
         var words: [TimedWord]
         var isAudioEvent: Bool
+        var speakerID: String?
 
         var characterCount: Int { text.filter { !$0.isWhitespace }.count }
         var duration: TimeInterval { max(0, end - start) }
@@ -68,7 +73,7 @@ enum ScribeSubtitleProcessor {
         let settings = Settings()
         let cjk = isCJK(languageCode)
         let limits = Limits(cps: cjk ? settings.cjkCPS : settings.latinCPS,
-                            charactersPerLine: cjk ? settings.cjkCharactersPerLine : settings.latinCharactersPerLine)
+                            maximumCharacters: cjk ? settings.cjkMaximumCharacters : settings.latinMaximumCharacters)
         let preprocessed = preprocess(rawWords)
         var basicEntries: [Entry] = []
 
@@ -100,8 +105,7 @@ enum ScribeSubtitleProcessor {
 
     private struct Limits {
         let cps: Double
-        let charactersPerLine: Int
-        var maximumCharacters: Int { charactersPerLine * 2 }
+        let maximumCharacters: Int
     }
 
     private static func isCJK(_ languageCode: String?) -> Bool {
@@ -148,7 +152,7 @@ enum ScribeSubtitleProcessor {
         guard let start = token.start, let end = token.end,
               start.isFinite, end.isFinite, end >= start,
               !token.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return TimedWord(text: token.text, start: start, end: end, type: token.type)
+        return TimedWord(text: token.text, start: start, end: end, type: token.type, speakerID: token.speakerID)
     }
 
     private static func semanticGroups(_ words: [TimedWord], pauseThreshold: TimeInterval) -> [[TimedWord]] {
@@ -156,9 +160,12 @@ enum ScribeSubtitleProcessor {
         var groups: [[TimedWord]] = []
         var current: [TimedWord] = []
         for word in words {
-            if let previous = current.last, word.start - previous.end > pauseThreshold {
-                groups.append(current)
-                current = []
+            if let previous = current.last {
+                let speakerChanged = previous.speakerID != nil && word.speakerID != nil && previous.speakerID != word.speakerID
+                if speakerChanged || word.start - previous.end > pauseThreshold {
+                    groups.append(current)
+                    current = []
+                }
             }
             current.append(word)
             if punctuationPriority(word.text) == 0 {
@@ -180,6 +187,7 @@ enum ScribeSubtitleProcessor {
             var characters = 0
             var mediumBoundary: Int?
             var lowBoundary: Int?
+            var pauseBoundary: Int?
             let groupStart = remaining[0].start
 
             for (index, word) in remaining.enumerated() {
@@ -193,6 +201,10 @@ enum ScribeSubtitleProcessor {
                 let priority = punctuationPriority(word.text)
                 if priority == 1 { mediumBoundary = index + 1 }
                 if priority == 2 { lowBoundary = index + 1 }
+                if index + 1 < remaining.count,
+                   remaining[index + 1].start - word.end >= settings.naturalSplitPause {
+                    pauseBoundary = index + 1
+                }
             }
 
             if allowedCount >= remaining.count {
@@ -201,16 +213,13 @@ enum ScribeSubtitleProcessor {
             }
 
             let minimumUsefulBoundary = max(1, allowedCount / 2)
-            // Commas are never timeline boundaries. A long sentence may use a
-            // semicolon/colon, otherwise choose a neutral word boundary.
-            let preferred = mediumBoundary.flatMap {
-                $0 >= minimumUsefulBoundary && $0 <= allowedCount ? $0 : nil
-            }
-            var neutralBoundary = allowedCount
-            while neutralBoundary > minimumUsefulBoundary,
-                  punctuationPriority(remaining[neutralBoundary - 1].text) == 2 {
-                neutralBoundary -= 1
-            }
+            // Only exceptionally long sentences are split. Prefer clause
+            // punctuation or a real acoustic pause before a neutral boundary.
+            let preferred = [mediumBoundary, lowBoundary, pauseBoundary]
+                .compactMap { $0 }
+                .filter { $0 >= minimumUsefulBoundary && $0 <= allowedCount }
+                .max()
+            let neutralBoundary = allowedCount
             let splitCount = max(1, preferred ?? neutralBoundary)
             output.append(Array(remaining.prefix(splitCount)))
             remaining.removeFirst(splitCount)
@@ -222,7 +231,8 @@ enum ScribeSubtitleProcessor {
         guard let first = words.first, let last = words.last else { return nil }
         let text = words.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        return Entry(text: text, start: first.start, end: last.end, words: words, isAudioEvent: isAudioEvent)
+        return Entry(text: text, start: first.start, end: last.end, words: words,
+                     isAudioEvent: isAudioEvent, speakerID: words.compactMap(\.speakerID).first)
     }
 
     private static func mergeShortEntries(_ entries: [Entry], cjk: Bool, limits: Limits, settings: Settings) -> [Entry] {
@@ -247,20 +257,20 @@ enum ScribeSubtitleProcessor {
 
     private static func canMerge(_ first: Entry, _ second: Entry, cjk: Bool, limits: Limits, settings: Settings) -> Bool {
         guard !first.isAudioEvent, !second.isAudioEvent else { return false }
+        if let firstSpeaker = first.speakerID, let secondSpeaker = second.speakerID,
+           firstSpeaker != secondSpeaker { return false }
         let gap = second.start - first.end
-        guard gap >= settings.minimumGap, gap <= 2 else { return false }
+        guard gap >= -0.15, gap <= settings.maximumMergeGap else { return false }
         let joined = join(first.text, second.text, cjk: cjk)
         let duration = second.end - first.start
-        guard duration <= min(settings.maximumDuration, 6),
-              displayLineCount(joined, lineLimit: limits.charactersPerLine) <= settings.maximumLines,
-              cps(joined, duration: duration) <= dynamicCPSLimit(joined, base: limits.cps) else { return false }
+        guard duration <= settings.preferredMaximumDuration else { return false }
         return joined.filter { !$0.isWhitespace }.count <= limits.maximumCharacters
     }
 
     private static func mergeBenefit(_ first: Entry, _ second: Entry, settings: Settings) -> Double {
         var score = 0.0
-        if first.duration < settings.minimumDuration { score += (settings.minimumDuration - first.duration) * 20 }
-        if second.duration < settings.minimumDuration { score += (settings.minimumDuration - second.duration) * 20 }
+        if first.duration < settings.targetParagraphDuration { score += (settings.targetParagraphDuration - first.duration) * 8 }
+        if second.duration < settings.targetParagraphDuration { score += (settings.targetParagraphDuration - second.duration) * 8 }
         let gap = second.start - first.end
         if gap < 0.3 { score += (0.3 - gap) * 10 }
         else if gap < 0.5 { score += (0.5 - gap) * 5 }
@@ -280,7 +290,8 @@ enum ScribeSubtitleProcessor {
               start: first.start,
               end: second.end,
               words: first.words + second.words,
-              isAudioEvent: false)
+              isAudioEvent: false,
+              speakerID: first.speakerID ?? second.speakerID)
     }
 
     private static func join(_ first: String, _ second: String, cjk: Bool) -> String {
@@ -310,41 +321,12 @@ enum ScribeSubtitleProcessor {
         return output
     }
 
-    private static func cps(_ text: String, duration: TimeInterval) -> Double {
-        guard duration > 0 else { return .infinity }
-        return Double(text.filter { !$0.isWhitespace }.count) / duration
-    }
-
     private static func dynamicCPSLimit(_ text: String, base: Double) -> Double {
         let count = text.filter { !$0.isWhitespace }.count
         if count <= 3 { return base * 3 }
         if count <= 5 { return base * 2 }
         if count <= 10 { return base * 1.5 }
         return base
-    }
-
-    private static func displayLineCount(_ text: String, lineLimit: Int) -> Int {
-        guard !text.isEmpty else { return 0 }
-        var remaining = Array(text)
-        var lines = 0
-        while !remaining.isEmpty {
-            lines += 1
-            if remaining.count <= lineLimit { break }
-            let upper = min(lineLimit, remaining.count - 1)
-            var split = upper
-            if upper > 0 {
-                for index in stride(from: upper, through: 1, by: -1) {
-                    let character = remaining[index]
-                    if character.isWhitespace || punctuationPriority(String(character)) >= 0 {
-                        split = character.isWhitespace ? index : index + 1
-                        break
-                    }
-                }
-            }
-            remaining.removeFirst(max(1, split))
-            while remaining.first?.isWhitespace == true { remaining.removeFirst() }
-        }
-        return lines
     }
 
     /// 0 = sentence ending, 1 = clause ending, 2 = phrase separator.

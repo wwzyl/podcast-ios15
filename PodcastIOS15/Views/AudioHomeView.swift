@@ -3,6 +3,7 @@ import SwiftUI
 struct AudioHomeView: View {
     @EnvironmentObject private var store: LibraryStore
     @State private var showingAdd = false
+    @State private var selectedPodcastID: String?
 
     var body: some View {
         Group {
@@ -10,7 +11,10 @@ struct AudioHomeView: View {
             else {
                 List {
                     ForEach(store.podcasts) { podcast in
-                        NavigationLink(destination: PodcastDetailView(podcastID: podcast.id)) {
+                        NavigationLink(tag: podcast.id, selection: $selectedPodcastID) {
+                            PodcastDetailView(podcastID: podcast.id)
+                                .id(podcast.id)
+                        } label: {
                             PodcastRow(podcast: podcast)
                         }
                         .swipeActions { Button(role: .destructive) { store.remove(podcast) } label: { Label("删除", systemImage: "trash") } }

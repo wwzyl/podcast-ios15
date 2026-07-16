@@ -68,7 +68,7 @@ struct SelectableTranscriptText: UIViewRepresentable {
         }
 
         @objc func selectionGestureEnded(_ gesture: UILongPressGestureRecognizer) {
-            guard gesture.state == .ended || gesture.state == .cancelled else { return }
+            guard gesture.state == .ended else { return }
             guard let textView else { return }
             DispatchQueue.main.async { [weak self, weak textView] in
                 guard let textView else { return }
@@ -114,10 +114,6 @@ private final class IntrinsicTextView: UITextView {
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesEnded(touches, with: event)
-        onInteractionEnded?()
-    }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesCancelled(touches, with: event)
         onInteractionEnded?()
     }
 }

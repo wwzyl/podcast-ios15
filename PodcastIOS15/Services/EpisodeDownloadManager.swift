@@ -229,7 +229,7 @@ final class EpisodeDownloadManager: ObservableObject {
 private final class StreamingAudioDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let destination: URL
     private let staging: URL
-    private let progressHandler: @Sendable (Int64, Int64) -> Void
+    private let progressHandler: (Int64, Int64) -> Void
     private let stateLock = NSLock()
     private var task: URLSessionDataTask?
     private var cancelRequested = false
@@ -256,7 +256,7 @@ private final class StreamingAudioDownloader: NSObject, URLSessionDataDelegate, 
         return URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
     }()
 
-    init(destination: URL, progressHandler: @escaping @Sendable (Int64, Int64) -> Void) {
+    init(destination: URL, progressHandler: @escaping (Int64, Int64) -> Void) {
         self.destination = destination
         self.staging = destination.deletingLastPathComponent()
             .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).partial")

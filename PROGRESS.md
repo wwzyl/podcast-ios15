@@ -201,3 +201,11 @@
 - [x] 84. 恢复旧后台任务时忽略其中保存的绝对路径，只用 episode id 和扩展名生成当前容器文件名；运行时完全不再读取、写入或清理旧 `EpisodeAudio` 目录。
 - [x] 85. 音频与转录继续独立缓存；Whisper 失败不删除整集音频，已成功落盘的同一 episode 再次打开不会重新下载。
 - [ ] 86. 立即推送 GitHub Actions 构建 1.5.0（9），下载并校验新版 IPA。
+
+## 2026-07-16：1.6.1（11）彻底移除 CFNetwork 下载临时文件依赖
+
+- [x] 87. 确认权限故障由 `5b7ab46` 引入的后台 `URLSessionDownloadTask` 路径导致；后续仅调整 `CFNetworkDownload.tmp` 的移动和复制目标，没有消除临时文件访问根因。
+- [x] 88. 整集音频恢复为 `URLSessionDataTask` 流式写入当前 Caches 的隐藏 `.partial` 文件，完成后只在同一目录原子改名，不再读取、复制或移动 `CFNetworkDownload.tmp`。
+- [x] 89. App 启动时接管并取消旧 session identifier 下的遗留后台任务，旧任务即使回调也直接丢弃临时文件，不再尝试写入失效的 `EpisodeAudio` 或旧沙盒路径。
+- [x] 90. 保留稳定 episode id 文件名和扩展名回退查找；转录失败只影响转录缓存，完整音频继续保留，退出后再次进入不会重复下载。
+- [ ] 91. 通过 GitHub Actions Xcode 15.4 编译 1.6.1（11），下载 IPA 后进行真机“下载成功、转录失败、退出重进不重复下载”验证。

@@ -31,11 +31,11 @@ final class PodcastAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        guard identifier == BackgroundDownloadCoordinator.sessionIdentifier else {
+        guard identifier == LegacyBackgroundDownloadCleaner.sessionIdentifier else {
             completionHandler()
             return
         }
-        BackgroundDownloadCoordinator.shared.handleEvents(completionHandler: completionHandler)
+        LegacyBackgroundDownloadCleaner.shared.handleEvents(completionHandler: completionHandler)
     }
 }
 

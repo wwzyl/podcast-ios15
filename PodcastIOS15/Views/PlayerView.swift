@@ -192,7 +192,7 @@ private struct PlayerContentView: View {
     private var audioStatusBanner: some View {
         switch downloads.state(for: episode) {
         case .queued:
-            HStack { ProgressView(); Text("已加入后台下载队列") }
+            HStack { ProgressView(); Text("已加入下载队列") }
                 .font(.caption).padding(9).frame(maxWidth: .infinity, alignment: .leading)
                 .background(AppTheme.purple.opacity(0.09))
         case .downloading(let progress, _, _):

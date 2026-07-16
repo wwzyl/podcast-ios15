@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import UIKit
 
 enum EpisodeDownloadState: Equatable {
     case idle
@@ -12,10 +11,10 @@ enum EpisodeDownloadState: Equatable {
     var statusText: String? {
         switch self {
         case .idle: return nil
-        case .queued: return "已加入后台下载队列"
+        case .queued: return "已加入下载队列"
         case .downloading(let progress, let received, let total):
-            if total > 0 { return "正在后台下载音频 \(Int(progress * 100))%（\(received.byteString) / \(total.byteString)）" }
-            return "正在后台下载音频（已下载 \(received.byteString)）"
+            if total > 0 { return "正在下载音频 \(Int(progress * 100))%（\(received.byteString) / \(total.byteString)）" }
+            return "正在下载音频（已下载 \(received.byteString)）"
         case .ready: return "音频下载完成"
         case .failed(let message): return "音频下载失败：\(message)"
         }
@@ -51,16 +50,14 @@ final class EpisodeDownloadManager: ObservableObject {
         }
     }
 
-    private typealias Waiter = CheckedContinuation<URL, Error>
-    private var waiters: [String: [Waiter]] = [:]
+    private var running: [String: Task<URL, Error>] = [:]
     private var activeTokens: [String: String] = [:]
-    private let coordinator = BackgroundDownloadCoordinator.shared
 
     init() {
         let saved = UserDefaults.standard.object(forKey: "audioCachePolicy") as? Int ?? AudioCachePolicy.fifteenDays.rawValue
         cachePolicy = AudioCachePolicy(rawValue: saved) ?? .fifteenDays
         cleanupExpired()
-        configureCoordinator()
+        LegacyBackgroundDownloadCleaner.shared.cancelOutstandingTasks()
     }
 
     func state(for episode: Episode) -> EpisodeDownloadState {
@@ -91,28 +88,48 @@ final class EpisodeDownloadManager: ObservableObject {
             states[episode.id] = .ready(local)
             return local
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters[episode.id, default: []].append(continuation)
-            if activeTokens[episode.id] == nil {
-                let token = UUID().uuidString
-                activeTokens[episode.id] = token
-                states[episode.id] = .queued
+        if let task = running[episode.id] {
+            return try await task.value
+        }
+
+        let token = UUID().uuidString
+        activeTokens[episode.id] = token
+        states[episode.id] = .queued
+        let task = Task<URL, Error> { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.performDownload(episode, token: token)
+        }
+        running[episode.id] = task
+        updateQueuedCount()
+
+        do {
+            let url = try await task.value
+            if activeTokens[episode.id] == token {
+                activeTokens[episode.id] = nil
+                running[episode.id] = nil
+                markAccess(url)
+                states[episode.id] = .ready(url)
+                refreshCacheSize()
                 updateQueuedCount()
-                coordinator.start(episodeID: episode.id,
-                                  token: token,
-                                  remoteURL: episode.audioURL,
-                                  destinationURL: destination(for: episode))
             }
+            return url
+        } catch {
+            if activeTokens[episode.id] == token {
+                activeTokens[episode.id] = nil
+                running[episode.id] = nil
+                states[episode.id] = .failed(error.localizedDescription)
+                updateQueuedCount()
+            }
+            throw error
         }
     }
 
     func retry(_ episode: Episode) async throws -> URL {
-        if let oldToken = activeTokens.removeValue(forKey: episode.id) {
-            coordinator.cancel(episodeID: episode.id, token: oldToken)
-        }
-        resumeWaiters(for: episode.id, result: .failure(CancellationError()))
+        running.removeValue(forKey: episode.id)?.cancel()
+        activeTokens[episode.id] = nil
         if let local = localURL(for: episode) { try? FileManager.default.removeItem(at: local) }
         try? FileManager.default.removeItem(at: destination(for: episode))
+        removePartialFiles(for: episode)
         states[episode.id] = .idle
         updateQueuedCount()
         return try await download(episode)
@@ -130,11 +147,11 @@ final class EpisodeDownloadManager: ObservableObject {
     }
 
     func clearEpisodeCache() {
-        coordinator.cancelAll()
+        for task in running.values { task.cancel() }
+        running.removeAll()
         activeTokens.removeAll()
-        for episodeID in Array(waiters.keys) { resumeWaiters(for: episodeID, result: .failure(CancellationError())) }
         states.removeAll()
-        for url in cachedAudioURLs { try? FileManager.default.removeItem(at: url) }
+        for url in episodeAudioURLs { try? FileManager.default.removeItem(at: url) }
         cacheSize = 0
         updateQueuedCount()
     }
@@ -146,46 +163,25 @@ final class EpisodeDownloadManager: ObservableObject {
         }
     }
 
-    private func configureCoordinator() {
-        coordinator.onProgress = { [weak self] episodeID, token, received, total in
-            Task { @MainActor in
-                guard let self, self.activeTokens[episodeID] == token else { return }
-                let progress = total > 0 ? min(1, Double(received) / Double(total)) : 0
-                self.states[episodeID] = .downloading(progress: progress, received: received, total: total)
-            }
-        }
-        coordinator.onCompletion = { [weak self] episodeID, token, result in
-            Task { @MainActor in
-                guard let self, self.activeTokens[episodeID] == token else { return }
-                self.activeTokens[episodeID] = nil
-                switch result {
-                case .success(let url):
-                    self.markAccess(url)
-                    self.states[episodeID] = .ready(url)
-                    self.refreshCacheSize()
-                    self.resumeWaiters(for: episodeID, result: .success(url))
-                case .failure(let error):
-                    self.states[episodeID] = .failed(error.localizedDescription)
-                    self.resumeWaiters(for: episodeID, result: .failure(error))
-                }
-                self.updateQueuedCount()
-            }
-        }
-        coordinator.restoreTasks { [weak self] descriptors in
-            Task { @MainActor in
-                guard let self else { return }
-                for descriptor in descriptors {
-                    self.activeTokens[descriptor.episodeID] = descriptor.token
-                    self.states[descriptor.episodeID] = .queued
-                }
-                self.updateQueuedCount()
-            }
-        }
-    }
+    private func performDownload(_ episode: Episode, token: String) async throws -> URL {
+        let destination = destination(for: episode)
+        var request = URLRequest(url: episode.audioURL)
+        request.timeoutInterval = 60 * 60
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("PodcastIOS15/1.6.1", forHTTPHeaderField: "User-Agent")
 
-    private func resumeWaiters(for episodeID: String, result: Result<URL, Error>) {
-        let values = waiters.removeValue(forKey: episodeID) ?? []
-        for waiter in values { waiter.resume(with: result) }
+        let downloader = StreamingAudioDownloader(destination: destination) { [weak self] received, total in
+            Task { @MainActor in
+                guard let self, self.activeTokens[episode.id] == token else { return }
+                let progress = total > 0 ? min(1, Double(received) / Double(total)) : 0
+                self.states[episode.id] = .downloading(progress: progress, received: received, total: total)
+            }
+        }
+        return try await withTaskCancellationHandler {
+            try await downloader.download(request)
+        } onCancel: {
+            downloader.cancel()
+        }
     }
 
     private func updateQueuedCount() { queuedCount = activeTokens.count }
@@ -205,10 +201,24 @@ final class EpisodeDownloadManager: ObservableObject {
     }
 
     private var cachedAudioURLs: [URL] {
+        episodeAudioURLs.filter { !$0.lastPathComponent.hasSuffix(".partial") }
+    }
+
+    private var episodeAudioURLs: [URL] {
         let values = (try? FileManager.default.contentsOfDirectory(at: audioRoot,
                                                                   includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
-                                                                  options: [.skipsHiddenFiles])) ?? []
-        return values.filter { $0.lastPathComponent.hasPrefix(episodeAudioFilenamePrefix) }
+                                                                  options: [])) ?? []
+        return values.filter {
+            $0.lastPathComponent.contains(episodeAudioFilenamePrefix) &&
+            ($0.lastPathComponent.hasPrefix(episodeAudioFilenamePrefix) || $0.lastPathComponent.hasPrefix("." + episodeAudioFilenamePrefix))
+        }
+    }
+
+    private func removePartialFiles(for episode: Episode) {
+        let marker = episodeAudioFilenamePrefix + cacheStem(for: episode)
+        for url in episodeAudioURLs where url.lastPathComponent.contains(marker) && url.lastPathComponent.hasSuffix(".partial") {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     private func markAccess(_ url: URL) {
@@ -216,100 +226,118 @@ final class EpisodeDownloadManager: ObservableObject {
     }
 }
 
-struct BackgroundDownloadDescriptor: Codable {
-    let episodeID: String
-    let token: String
-    let destinationPath: String
-
-    var encoded: String? {
-        try? JSONEncoder().encode(self).base64EncodedString()
-    }
-    static func decode(_ value: String?) -> BackgroundDownloadDescriptor? {
-        guard let value, let data = Data(base64Encoded: value) else { return nil }
-        return try? JSONDecoder().decode(Self.self, from: data)
-    }
-}
-
-final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate, URLSessionDelegate, @unchecked Sendable {
-    static let shared = BackgroundDownloadCoordinator()
-    static let sessionIdentifier = "com.podcastios15.app.episode-downloads"
-
-    var onProgress: ((String, String, Int64, Int64) -> Void)?
-    var onCompletion: ((String, String, Result<URL, Error>) -> Void)?
-    private var movedURLs: [Int: URL] = [:]
-    private var moveErrors: [Int: Error] = [:]
-    private var backgroundCompletionHandler: (() -> Void)?
-    private let downloadDelegateQueue: OperationQueue = {
+private final class StreamingAudioDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let destination: URL
+    private let staging: URL
+    private let progressHandler: @Sendable (Int64, Int64) -> Void
+    private let stateLock = NSLock()
+    private var task: URLSessionDataTask?
+    private var cancelRequested = false
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var output: FileHandle?
+    private var received: Int64 = 0
+    private var total: Int64 = 0
+    private var writeError: Error?
+    private var finished = false
+    private let delegateQueue: OperationQueue = {
         let queue = OperationQueue()
-        queue.name = "PodcastIOS15.AudioDownloadPersistence"
+        queue.name = "PodcastIOS15.AudioStreamingPersistence"
         queue.maxConcurrentOperationCount = 1
         queue.qualityOfService = .utility
         return queue
     }()
     private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
-        configuration.sessionSendsLaunchEvents = true
-        configuration.isDiscretionary = false
-        configuration.allowsCellularAccess = true
-        configuration.httpMaximumConnectionsPerHost = 2
-        configuration.timeoutIntervalForResource = 60 * 60 * 24
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: downloadDelegateQueue)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 60 * 60
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
     }()
 
-    func start(episodeID: String, token: String, remoteURL: URL, destinationURL: URL) {
-        var request = URLRequest(url: remoteURL)
-        request.timeoutInterval = 60 * 60
-        request.setValue("PodcastIOS15/1.5.0", forHTTPHeaderField: "User-Agent")
-        let task = session.downloadTask(with: request)
-        // 只持久化文件名。App 更新或重新安装后沙盒容器路径可能变化，
-        // 后台 URLSession 恢复旧任务时不能继续使用旧容器的绝对路径。
-        task.taskDescription = BackgroundDownloadDescriptor(episodeID: episodeID,
-                                                            token: token,
-                                                            destinationPath: destinationURL.lastPathComponent).encoded
-        task.resume()
+    init(destination: URL, progressHandler: @escaping @Sendable (Int64, Int64) -> Void) {
+        self.destination = destination
+        self.staging = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).partial")
+        self.progressHandler = progressHandler
     }
 
-    func restoreTasks(completion: @escaping ([BackgroundDownloadDescriptor]) -> Void) {
-        session.getAllTasks { tasks in
-            completion(tasks.compactMap { BackgroundDownloadDescriptor.decode($0.taskDescription) })
+    func download(_ request: URLRequest) async throws -> URL {
+        try prepareOutput()
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            let task = session.dataTask(with: request)
+            stateLock.lock()
+            self.task = task
+            let shouldCancel = cancelRequested
+            stateLock.unlock()
+            if shouldCancel { task.cancel() } else { task.resume() }
         }
     }
 
-    func cancel(episodeID: String, token: String) {
-        session.getAllTasks { tasks in
-            tasks.filter {
-                let value = BackgroundDownloadDescriptor.decode($0.taskDescription)
-                return value?.episodeID == episodeID && value?.token == token
-            }.forEach { $0.cancel() }
+    func cancel() {
+        stateLock.lock()
+        cancelRequested = true
+        let task = task
+        stateLock.unlock()
+        task?.cancel()
+    }
+
+    private func prepareOutput() throws {
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: staging)
+        guard FileManager.default.createFile(atPath: staging.path, contents: nil,
+                                             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]) else {
+            throw CocoaError(.fileWriteNoPermission)
         }
+        output = try FileHandle(forWritingTo: staging)
     }
 
-    func cancelAll() { session.getAllTasks { $0.forEach { $0.cancel() } } }
-
-    func handleEvents(completionHandler: @escaping () -> Void) {
-        backgroundCompletionHandler = completionHandler
-        _ = session
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            writeError = URLError(.badServerResponse)
+            completionHandler(.cancel)
+            return
+        }
+        total = max(0, response.expectedContentLength)
+        progressHandler(0, total)
+        completionHandler(.allow)
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard let descriptor = BackgroundDownloadDescriptor.decode(downloadTask.taskDescription) else { return }
-        onProgress?(descriptor.episodeID, descriptor.token, totalBytesWritten, totalBytesExpectedToWrite)
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let descriptor = BackgroundDownloadDescriptor.decode(downloadTask.taskDescription) else { return }
-        // 旧任务可能仍保存 Application Support/EpisodeAudio 的绝对路径。
-        // 忽略旧目录，只保留扩展名，并用 episode id 在当前 Caches 根目录生成稳定文件名。
-        let oldFilename = URL(fileURLWithPath: descriptor.destinationPath).lastPathComponent
-        let ext = URL(fileURLWithPath: oldFilename).pathExtension.isEmpty ? "m4a" : URL(fileURLWithPath: oldFilename).pathExtension
-        let filename = "\(episodeAudioFilenamePrefix)\(episodeAudioDigest(descriptor.episodeID)).\(ext)"
-        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        let destination = root.appendingPathComponent(filename, isDirectory: false)
-        let staging = root.appendingPathComponent(".\(filename).\(UUID().uuidString).partial", isDirectory: false)
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard writeError == nil, let output else { return }
         do {
-            // 不对 CFNetwork 临时文件做跨目录 rename。逐块复制到当前沙盒，
-            // 再在同一个 Caches 目录内原子改名，规避 EpisodeAudio 权限错误。
-            try copyDownloadedFile(from: location, to: staging)
+            try output.write(contentsOf: data)
+            received += Int64(data.count)
+            progressHandler(received, total)
+        } catch {
+            writeError = error
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !finished else { return }
+        if let writeError {
+            finish(.failure(writeError))
+            return
+        }
+        if let error {
+            finish(.failure(error))
+            return
+        }
+        guard received > 0 else {
+            finish(.failure(URLError(.zeroByteResource)))
+            return
+        }
+        do {
+            try output?.synchronize()
+            try output?.close()
+            output = nil
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }
@@ -320,40 +348,56 @@ final class BackgroundDownloadCoordinator: NSObject, URLSessionDownloadDelegate,
             values.isExcludedFromBackup = true
             var persistedURL = destination
             try? persistedURL.setResourceValues(values)
-            movedURLs[downloadTask.taskIdentifier] = destination
+            finish(.success(destination))
         } catch {
-            try? FileManager.default.removeItem(at: staging)
-            moveErrors[downloadTask.taskIdentifier] = error
+            finish(.failure(error))
         }
     }
 
-    private func copyDownloadedFile(from source: URL, to destination: URL) throws {
-        guard FileManager.default.createFile(atPath: destination.path, contents: nil,
-                                             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]) else {
-            throw CocoaError(.fileWriteNoPermission)
+    private func finish(_ result: Result<URL, Error>) {
+        guard !finished else { return }
+        finished = true
+        try? output?.close()
+        output = nil
+        if case .failure = result { try? FileManager.default.removeItem(at: staging) }
+        continuation?.resume(with: result)
+        continuation = nil
+        session.finishTasksAndInvalidate()
+    }
+}
+
+final class LegacyBackgroundDownloadCleaner: NSObject, URLSessionDownloadDelegate, URLSessionDelegate, @unchecked Sendable {
+    static let shared = LegacyBackgroundDownloadCleaner()
+    static let sessionIdentifier = "com.podcastios15.app.episode-downloads"
+
+    private var backgroundCompletionHandler: (() -> Void)?
+    private let delegateQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "PodcastIOS15.LegacyBackgroundDownloadCleanup"
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        return queue
+    }()
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        configuration.sessionSendsLaunchEvents = true
+        configuration.isDiscretionary = false
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
+    }()
+
+    func cancelOutstandingTasks() {
+        session.getAllTasks { tasks in
+            tasks.forEach { $0.cancel() }
         }
-        let input = try FileHandle(forReadingFrom: source)
-        let output = try FileHandle(forWritingTo: destination)
-        defer {
-            try? input.close()
-            try? output.close()
-        }
-        while true {
-            let data = try input.read(upToCount: 512 * 1024) ?? Data()
-            if data.isEmpty { break }
-            try output.write(contentsOf: data)
-        }
-        try output.synchronize()
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let descriptor = BackgroundDownloadDescriptor.decode(task.taskDescription) else { return }
-        let result: Result<URL, Error>
-        if let error { result = .failure(error) }
-        else if let moveError = moveErrors.removeValue(forKey: task.taskIdentifier) { result = .failure(moveError) }
-        else if let url = movedURLs.removeValue(forKey: task.taskIdentifier) { result = .success(url) }
-        else { result = .failure(URLError(.cannotCreateFile)) }
-        onCompletion?(descriptor.episodeID, descriptor.token, result)
+    func handleEvents(completionHandler: @escaping () -> Void) {
+        backgroundCompletionHandler = completionHandler
+        _ = session
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // Legacy tasks are deliberately discarded. New downloads never use CFNetwork temp files.
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {

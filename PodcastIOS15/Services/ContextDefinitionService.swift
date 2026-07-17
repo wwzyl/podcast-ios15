@@ -12,7 +12,7 @@ struct ContextDefinitionConfiguration {
     }
 
     var shouldUseAIProvider: Bool {
-        enabled || !hasUserAPI
+        enabled
     }
 
     func withStyle(_ style: AIExplanationStyle) -> ContextDefinitionConfiguration {

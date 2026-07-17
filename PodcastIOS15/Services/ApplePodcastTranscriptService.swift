@@ -2,19 +2,38 @@ import Foundation
 
 struct ApplePodcastTranscriptService {
     private let tokenPage = URL(string: "https://www.apple.com/apple-podcasts/")!
+    private let transcriptTokenURL = URL(string: "https://sf-api-token-service.itunes.apple.com/apiToken?clientClass=apple&clientId=com.apple.podcasts.macos&os=OS%20X&osVersion=26.1&productVersion=1.1.0&version=2")!
     private let ampBaseURL = "https://amp.josscii.top/v1/catalog/us"
+    private let transcriptRequestTimestamp = "2025-12-12T10:01:02Z"
+    private let transcriptStorefront = "143465-19,42 t:podcasts1"
+    private let transcriptActionSignature = [
+        "Aq9HDM432en0ARuPy8y3XaZIRq+AUn1wo4lSVR1gtq9XAAAB0AMAAAABAAABAIpWWhi9cLSe56os64UsS93Ue3Eh+ryXKDuOxypy",
+        "hH2+gVHHnqtvzls1BuMig3FKQ2mBnyR8s73aW5qpUNXdiDQnQBhzvkr9Sv7rFZFak1VdYNcqR2ou8AiHuaJKtTPRnbmdD/3ukpQy",
+        "rfBSCLiEFs806ockTYRF7Kq01pupgixUuMir8qZIkUaHBcG/sxBaM7gV86M6mBmU34ELxxd6cnhIIV0CCSoH9aMfD0aGmLveNfo1",
+        "m+Z5uJTlI9btFuikdtNDe+kkHDuMivEocrUmiO9ycWCPCm76guX9sggjexvoniQ8jZw+4O5y2ENHKrBVfirYYovrBBFMidA/byD8",
+        "Q0YAAAAfQGlWB7+aN4g4IHYyPRMnxSevbnT9byQbZ4M+YE5zWQAAAJ8BgVGjNVGSjwOXXgb2Ht8lG/mWl/gAAACGAAP/+3a7FWKQ",
+        "3B0gjOvK0ng+aTvns5Lej8O9bvWJJY1SR522QevROcOaEy8yL3jCAUVSLhvJPAScJw6Y0WIY6jabCHWYOX88OnfkCR+v6OBOw4v2",
+        "4D6KniJh5bp8ftbUWMfYmARKX4F1JFUfXtPEJ3IeJVomhUSv2zc3wJYonytx7kA0YFQA"
+    ].joined()
 
     func load(for episode: Episode) async throws -> [TranscriptSegment] {
-        let token = try await applePodcastToken()
-        guard let episodeID = try await resolveAppleEpisodeID(for: episode, token: token) else {
-            throw TranscriptError.empty
+        let episodeID: String
+        if let knownEpisodeID = episode.appleEpisodeID, !knownEpisodeID.isEmpty {
+            episodeID = knownEpisodeID
+        } else {
+            let catalogToken = try await applePodcastToken()
+            guard let resolvedEpisodeID = try await resolveAppleEpisodeID(for: episode, token: catalogToken) else {
+                throw TranscriptError.empty
+            }
+            episodeID = resolvedEpisodeID
         }
-        let asset = try await transcriptAsset(for: episodeID, token: token)
+        let transcriptToken = try await appleTranscriptToken()
+        let asset = try await transcriptAsset(for: episodeID, token: transcriptToken)
         var request = URLRequest(url: asset.url)
         request.timeoutInterval = 30
         request.setValue("Aisten/6.3.5 PodcastIOS15/1.0", forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.apple.com", forHTTPHeaderField: "Origin")
-        request.setValue("Bearer \(asset.token ?? token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(asset.token ?? transcriptToken)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response)
         return try TranscriptService.parse(data: data, type: asset.type)
@@ -31,6 +50,20 @@ struct ApplePodcastTranscriptService {
             throw TranscriptError.empty
         }
         return token
+    }
+
+    private func appleTranscriptToken() async throws -> String {
+        var request = URLRequest(url: transcriptTokenURL)
+        request.timeoutInterval = 30
+        request.setValue("Aisten/6.3.5", forHTTPHeaderField: "User-Agent")
+        request.setValue(transcriptRequestTimestamp, forHTTPHeaderField: "x-request-timestamp")
+        request.setValue(transcriptActionSignature, forHTTPHeaderField: "X-Apple-ActionSignature")
+        request.setValue(transcriptStorefront, forHTTPHeaderField: "X-Apple-Store-Front")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response)
+        let decoded = try JSONDecoder().decode(AppleTranscriptTokenResponse.self, from: data)
+        guard !decoded.token.isEmpty else { throw TranscriptError.empty }
+        return decoded.token
     }
 
     private func resolveAppleEpisodeID(for episode: Episode, token: String) async throws -> String? {
@@ -182,6 +215,10 @@ struct ApplePodcastTranscriptService {
         }
         return nil
     }
+}
+
+private struct AppleTranscriptTokenResponse: Decodable {
+    let token: String
 }
 
 private extension String {

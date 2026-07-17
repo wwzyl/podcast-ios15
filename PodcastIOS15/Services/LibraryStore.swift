@@ -17,7 +17,6 @@ final class LibraryStore: ObservableObject {
     @Published var contextGPTModel = "gpt-4o-mini" { didSet { UserDefaults.standard.set(contextGPTModel, forKey: "contextGPTModel") } }
     @Published var translationProvider = TranslationProvider.microsoft.rawValue { didSet { UserDefaults.standard.set(translationProvider, forKey: "translationProvider") } }
     @Published var translationFallbackEnabled = true { didSet { UserDefaults.standard.set(translationFallbackEnabled, forKey: "translationFallbackEnabled") } }
-    @Published var deeplAPIKey = "" { didSet { UserDefaults.standard.set(deeplAPIKey, forKey: "deeplAPIKey") } }
     @Published var aiOutputLanguage = "zh-Hans" { didSet { UserDefaults.standard.set(aiOutputLanguage, forKey: "aiOutputLanguage") } }
     @Published var aiExplanationStyle = AIExplanationStyle.detailed.rawValue { didSet { UserDefaults.standard.set(aiExplanationStyle, forKey: "aiExplanationStyle") } }
     @Published var transcriptionSplitOnComma = false { didSet { UserDefaults.standard.set(transcriptionSplitOnComma, forKey: "transcriptionSplitOnComma") } }
@@ -57,9 +56,11 @@ final class LibraryStore: ObservableObject {
         contextGPTBaseURL = UserDefaults.standard.string(forKey: "contextGPTBaseURL") ?? "https://api.openai.com/v1"
         contextGPTAPIKey = UserDefaults.standard.string(forKey: "contextGPTAPIKey") ?? ""
         contextGPTModel = UserDefaults.standard.string(forKey: "contextGPTModel") ?? "gpt-4o-mini"
-        translationProvider = UserDefaults.standard.string(forKey: "translationProvider") ?? TranslationProvider.microsoft.rawValue
+        let storedTranslationProvider = UserDefaults.standard.string(forKey: "translationProvider") ?? TranslationProvider.microsoft.rawValue
+        translationProvider = TranslationProvider(rawValue: storedTranslationProvider)?.rawValue ?? TranslationProvider.microsoft.rawValue
+        UserDefaults.standard.set(translationProvider, forKey: "translationProvider")
+        UserDefaults.standard.removeObject(forKey: "deeplAPIKey")
         translationFallbackEnabled = UserDefaults.standard.object(forKey: "translationFallbackEnabled") as? Bool ?? true
-        deeplAPIKey = UserDefaults.standard.string(forKey: "deeplAPIKey") ?? ""
         aiOutputLanguage = UserDefaults.standard.string(forKey: "aiOutputLanguage") ?? "zh-Hans"
         aiExplanationStyle = UserDefaults.standard.string(forKey: "aiExplanationStyle") ?? AIExplanationStyle.detailed.rawValue
         transcriptionSplitOnComma = UserDefaults.standard.bool(forKey: "transcriptionSplitOnComma")
@@ -86,7 +87,6 @@ final class LibraryStore: ObservableObject {
     var translationConfiguration: TranslationConfiguration {
         TranslationConfiguration(provider: TranslationProvider(rawValue: translationProvider) ?? .microsoft,
                                  allowFallback: translationFallbackEnabled,
-                                 deeplAPIKey: deeplAPIKey,
                                  gptBaseURL: contextGPTBaseURL,
                                  gptAPIKey: contextGPTAPIKey,
                                  gptModel: contextGPTModel)
@@ -98,7 +98,12 @@ final class LibraryStore: ObservableObject {
 
     func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil, appleCollectionID: Int? = nil) async throws {
         var podcast = try await RSSService().load(feedURL: feedURL)
-        let resolvedAppleCollectionID = appleCollectionID ?? await PodcastSearchService().collectionID(feedURL: feedURL, title: podcast.title)
+        let resolvedAppleCollectionID: Int?
+        if let appleCollectionID = appleCollectionID {
+            resolvedAppleCollectionID = appleCollectionID
+        } else {
+            resolvedAppleCollectionID = await PodcastSearchService().collectionID(feedURL: feedURL, title: podcast.title)
+        }
         podcast.appleCollectionID = resolvedAppleCollectionID
         podcast.episodes = podcast.episodes.map { episode in
             var value = episode

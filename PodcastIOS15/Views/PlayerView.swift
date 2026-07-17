@@ -242,13 +242,15 @@ private struct PlayerContentView: View {
                 HStack {
                     Button("Scribe v2") { transcribeAudio(using: .scribe) }
                         .buttonStyle(.borderedProminent)
+                        .tint(AppTheme.purple)
                     Menu("Whisper") {
                         Button("极速") { transcribeAudio(using: .whisperFast) }
                         Button("均衡（更准确）") { transcribeAudio(using: .whisperBalanced) }
                         Button("英语极速") { transcribeAudio(using: .whisperFastEnglish) }
                         Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppTheme.purple)
                 }
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -287,12 +289,15 @@ private struct PlayerContentView: View {
                     HStack {
                         Button("重试 Scribe") { retryTranscription(using: .scribe) }
                             .buttonStyle(.borderedProminent)
+                            .tint(AppTheme.purple)
                         Menu("改用 Whisper") {
                             Button("极速") { retryTranscription(using: .whisperFast) }
                             Button("均衡（更准确）") { retryTranscription(using: .whisperBalanced) }
                             Button("英语极速") { retryTranscription(using: .whisperFastEnglish) }
                             Button("英语均衡（更准确）") { retryTranscription(using: .whisperBalancedEnglish) }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(AppTheme.purple)
                     }
                 }
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -808,7 +813,7 @@ private struct WordLearningView: View {
             let resolvedSentenceTranslation = sentenceTranslation.isEmpty
                 ? ((try? await TranslationService.shared.translate(request.segment.text, to: store.targetLanguage, configuration: store.translationConfiguration)) ?? "")
                 : sentenceTranslation
-            let configuration = ContextDefinitionConfiguration(enabled: true,
+            let configuration = ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
                                                                baseURL: store.contextGPTBaseURL,
                                                                apiKey: store.contextGPTAPIKey,
                                                                model: store.contextGPTModel,
@@ -888,7 +893,7 @@ private struct WordLearningView: View {
                         next: request.next,
                         dictionary: dictionary,
                         targetLanguage: store.targetLanguage,
-                        configuration: ContextDefinitionConfiguration(enabled: true,
+                        configuration: ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
                                                                        baseURL: store.contextGPTBaseURL,
                                                                       apiKey: store.contextGPTAPIKey,
                                                                       model: store.contextGPTModel,

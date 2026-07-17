@@ -34,7 +34,7 @@ struct MoreView: View {
                 Toggle("播放时自动翻译当前句", isOn: $store.autoTranslateCurrentSentence)
                 HStack(alignment: .top) {
                     Image(systemName: "character.bubble")
-                    Text("可选择 DeepL、GPT 或 Microsoft；关闭自动回退后不会静默切换翻译服务。")
+                    Text("可选择 GPT 或 Microsoft；关闭自动回退后不会静默切换翻译服务。")
                 }.font(.caption).foregroundColor(.secondary)
                 NavigationLink("翻译与上下文释义设置") { ContextDefinitionSettingsView() }
             }
@@ -119,7 +119,7 @@ struct MoreView: View {
                 Button(role: .destructive) { showClear = true } label: { Label("清空生词库", systemImage: "trash") }
             }
             Section("关于") {
-                HStack { Text("版本"); Spacer(); Text("1.6.3 (13) · iOS 15").foregroundColor(.secondary) }
+                HStack { Text("版本"); Spacer(); Text(versionText).foregroundColor(.secondary) }
                 Text("这是面向 iOS 15 重新实现的播客语言学习工具，界面和主要学习流程参考 Aisten 6.3.5；未使用其不兼容的可执行代码。")
                     .font(.caption).foregroundColor(.secondary)
             }
@@ -148,6 +148,12 @@ struct MoreView: View {
             whisperModelCacheSize = WhisperModelCacheManager.cacheSize()
         }
     }
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "-"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-"
+        return "\(version) (\(build)) · iOS 15"
+    }
 }
 
 private struct ContextDefinitionSettingsView: View {
@@ -155,14 +161,10 @@ private struct ContextDefinitionSettingsView: View {
 
     var body: some View {
         Form {
-            Section("DeepL") {
-                SecureField("DeepL API Key", text: $store.deeplAPIKey)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-            }
             Section {
                 Toggle("使用 GPT 上下文释义", isOn: $store.contextGPTEnabled)
             } footer: {
-                Text("未填写 API Key 时，AI 分析、AI 解释、上下文释义和 GPT 翻译会默认使用内置接口；填写自己的 OpenAI 兼容接口后优先使用你的配置。")
+                Text("开启后，未填写 API Key 时使用 Built-in；填写自己的 OpenAI 兼容接口后优先使用你的配置。关闭后，上下文释义使用词典与微软翻译。")
             }
             Section("OpenAI 兼容接口") {
                 TextField("Base URL", text: $store.contextGPTBaseURL)

@@ -9,8 +9,8 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.6.5</string>
-    <key>CFBundleVersion</key><string>15</string>
+    <key>CFBundleShortVersionString</key><string>1.6.6</string>
+    <key>CFBundleVersion</key><string>16</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInMedia</key><true/></dict>
     <key>UIBackgroundModes</key><array><string>audio</string></array>

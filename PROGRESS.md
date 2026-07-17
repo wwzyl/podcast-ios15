@@ -237,3 +237,15 @@
 - 本地 IPA：`D:\codex\aisten\PodcastIOS15-1.6.3-build13\PodcastIOS15-iOS15.ipa`
 - Artifact 备份：`D:\codex\aisten\PodcastIOS15-1.6.3-build13-artifact.zip`
 - IPA SHA-256：`4659EEF2F2BB2CD41796FB505F179318172B647E4F5BED179B3FE127832AB300`
+
+## 2026-07-17：1.6.6（16）构建、Built-in 与 Apple 文稿修复
+
+- [x] 102. 修复 `LibraryStore` 在空合并运算符右侧调用 `await` 导致的 Xcode 15.4 编译失败。
+- [x] 103. 恢复 GPT 开关语义：关闭时使用词典与 Microsoft；开启且未填 Key 时使用 Built-in；填写 Key 时优先使用用户的 OpenAI 兼容配置。
+- [x] 104. Built-in 非流式与 SSE 流式请求均完成真实网络验证，分别返回 `BUILTIN_OK` 与 `STREAM_OK`。
+- [x] 105. 按官方 6.3.5 的 transcript token 请求补齐 Apple 鉴权头；`This is Love - Hot Dog!` 已验证取得 2 条资源记录、下载 520 KB TTML，并解析出带时间的逐句内容。
+- [x] 106. Apple TTML 支持 `podcasts:unit=sentence/word`，避免单词粘连，并优先输出句级时间轴。
+- [x] 107. 移除 DeepL 设置和请求实现，翻译服务只保留 GPT 与 Microsoft；旧 `deepl` 选择自动迁移为 Microsoft。
+- [x] 108. Scribe 与 Whisper 主入口、失败重试入口统一使用紫色高亮按钮。
+- [x] 109. Microsoft 翻译、两个词典端点、Scribe 匿名词级转写、RSS 获取和音频 Range 下载均完成真实网络验证。
+- [ ] 110. 推送 GitHub 后用 Xcode 15.4 完成 1.6.6（16）Release 编译，并在 iOS 15 真机验证 Apple 文稿、两种转写按钮和 GPT 开关三种状态。

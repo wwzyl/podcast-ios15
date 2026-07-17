@@ -9,7 +9,7 @@
 - Podcasting 2.0 transcript、SRT、WebVTT、TTML 和常见 JSON 文稿
 - 无文稿节目由用户选择 Scribe v2、Whisper 极速/均衡、英语专用 Whisper 或 Apple 系统语音识别，不再自动开始转录
 - Whisper 极速内置 `ggml-base-q5_1`；其他档位首次选择时由 App 自动下载 GGML 和配套 Core ML encoder 并缓存，官方 Hugging Face 不可达时自动切换镜像，支持 Metal 和 Silero VAD 动态语音分段
-- DeepL、GPT 和 Microsoft 翻译路由，可关闭故障自动回退
+- GPT 和 Microsoft 翻译路由，可关闭故障自动回退
 - 前一句 + 当前句 + 后一句的上下文翻译、全文翻译
 - GPT 驱动的句子 AI 分析和词组 AI 解释
 - 在线英文释义、欧路词典、iOS 系统词典、生词库和句子收藏

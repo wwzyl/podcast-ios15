@@ -97,6 +97,13 @@ private final class TTMLTranscriptParser: NSObject, XMLParserDelegate {
     private var paragraphStart: TimeInterval?
     private var paragraphEnd: TimeInterval?
     private var insideParagraph = false
+    private var paragraphNeedsSeparator = false
+    private var paragraphHasSentences = false
+    private var sentenceText = ""
+    private var sentenceStart: TimeInterval?
+    private var sentenceEnd: TimeInterval?
+    private var sentenceSpanDepth = 0
+    private var sentenceNeedsSeparator = false
     private var parseError: Error?
 
     static func parse(_ data: Data) throws -> [TranscriptSegment] {
@@ -115,33 +122,98 @@ private final class TTMLTranscriptParser: NSObject, XMLParserDelegate {
         if name == "p" {
             insideParagraph = true
             paragraphText = ""
+            paragraphNeedsSeparator = false
+            paragraphHasSentences = false
             paragraphStart = Self.time(attributeDict["begin"] ?? attributeDict.first { $0.key.hasSuffix(":begin") }?.value)
             paragraphEnd = Self.time(attributeDict["end"] ?? attributeDict.first { $0.key.hasSuffix(":end") }?.value)
             if paragraphEnd == nil, let duration = Self.time(attributeDict["dur"]), let start = paragraphStart {
                 paragraphEnd = start + duration
             }
+        } else if insideParagraph, name == "span" {
+            let unit = attributeDict["podcasts:unit"] ?? attributeDict.first { $0.key.hasSuffix(":unit") }?.value
+            if unit == "sentence" {
+                paragraphNeedsSeparator = !paragraphText.isEmpty
+                sentenceText = ""
+                sentenceNeedsSeparator = false
+                sentenceStart = Self.time(attributeDict["begin"] ?? attributeDict.first { $0.key.hasSuffix(":begin") }?.value) ?? paragraphStart
+                sentenceEnd = Self.time(attributeDict["end"] ?? attributeDict.first { $0.key.hasSuffix(":end") }?.value) ?? paragraphEnd
+                sentenceSpanDepth = 1
+            } else if sentenceSpanDepth > 0 {
+                sentenceSpanDepth += 1
+            }
+            if unit == "word" {
+                paragraphNeedsSeparator = !paragraphText.isEmpty
+                if sentenceSpanDepth > 0 { sentenceNeedsSeparator = !sentenceText.isEmpty }
+            }
         } else if insideParagraph, name == "br" {
             paragraphText += " "
+            if sentenceSpanDepth > 0 { sentenceText += " " }
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if insideParagraph { paragraphText += string }
+        guard insideParagraph else { return }
+        Self.append(string, to: &paragraphText, needsSeparator: &paragraphNeedsSeparator)
+        if sentenceSpanDepth > 0 {
+            Self.append(string, to: &sentenceText, needsSeparator: &sentenceNeedsSeparator)
+        }
     }
 
     func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
-        if insideParagraph { paragraphText += String(data: CDATABlock, encoding: .utf8) ?? "" }
+        guard insideParagraph else { return }
+        let string = String(data: CDATABlock, encoding: .utf8) ?? ""
+        Self.append(string, to: &paragraphText, needsSeparator: &paragraphNeedsSeparator)
+        if sentenceSpanDepth > 0 {
+            Self.append(string, to: &sentenceText, needsSeparator: &sentenceNeedsSeparator)
+        }
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         let name = (qName ?? elementName).split(separator: ":").last?.lowercased() ?? ""
+        if name == "span", sentenceSpanDepth > 0 {
+            sentenceSpanDepth -= 1
+            if sentenceSpanDepth == 0 {
+                let text = Self.cleaned(sentenceText)
+                if let start = sentenceStart, !text.isEmpty {
+                    segments.append(TranscriptSegment(start: start, end: sentenceEnd, text: text))
+                    paragraphHasSentences = true
+                }
+            }
+            return
+        }
         guard name == "p", insideParagraph else { return }
         insideParagraph = false
-        let text = paragraphText.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let start = paragraphStart, !text.isEmpty {
+        let text = Self.cleaned(paragraphText)
+        if !paragraphHasSentences, let start = paragraphStart, !text.isEmpty {
             segments.append(TranscriptSegment(start: start, end: paragraphEnd, text: text))
         }
+    }
+
+    private static func append(_ string: String, to target: inout String, needsSeparator: inout Bool) {
+        guard !string.isEmpty else { return }
+        if needsSeparator, shouldInsertSpace(after: target.last, before: string.first) {
+            target += " "
+        }
+        needsSeparator = false
+        target += string
+    }
+
+    private static func shouldInsertSpace(after left: Character?, before right: Character?) -> Bool {
+        guard let left, let right, !left.isWhitespace, !right.isWhitespace else { return false }
+        if ",.;:!?%)]}".contains(right) || "([{\"".contains(left) { return false }
+        if isCJK(left), isCJK(right) { return false }
+        return true
+    }
+
+    private static func isCJK(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy {
+            (0x2E80...0x9FFF).contains(Int($0.value)) || (0xF900...0xFAFF).contains(Int($0.value))
+        }
+    }
+
+    private static func cleaned(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func time(_ raw: String?) -> TimeInterval? {

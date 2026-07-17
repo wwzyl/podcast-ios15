@@ -8,11 +8,6 @@ enum TranscriptionEngine: String, CaseIterable {
     case whisperBalanced
     case whisperFastEnglish
     case whisperBalancedEnglish
-    case systemSpeechAuto
-    case systemSpeechEnglish
-    case systemSpeechChinese
-    case systemSpeechJapanese
-    case systemSpeechKorean
 
     var title: String {
         switch self {
@@ -21,11 +16,6 @@ enum TranscriptionEngine: String, CaseIterable {
         case .whisperBalanced: return "Whisper 均衡"
         case .whisperFastEnglish: return "Whisper 英语极速"
         case .whisperBalancedEnglish: return "Whisper 英语均衡"
-        case .systemSpeechAuto: return "Apple 系统识别"
-        case .systemSpeechEnglish: return "Apple 英语识别"
-        case .systemSpeechChinese: return "Apple 中文识别"
-        case .systemSpeechJapanese: return "Apple 日语识别"
-        case .systemSpeechKorean: return "Apple 韩语识别"
         }
     }
 }
@@ -60,7 +50,7 @@ final class TranscriptionManager: ObservableObject {
                                      errorMessage: nil, engine: .scribe, statusText: nil)
     }
 
-    func start(episode: Episode, audioURL: URL, engine: TranscriptionEngine = .scribe, force: Bool = false) {
+    func start(episode: Episode, audioURL: URL, engine: TranscriptionEngine, force: Bool = false) {
         if tasks[episode.id] != nil { return }
         if !force, TranscriptCache.isComplete(episodeID: episode.id), let cached = TranscriptCache.load(episodeID: episode.id) {
             jobs[episode.id] = TranscriptionJobState(segments: cached, progress: 1, isRunning: false,
@@ -79,7 +69,6 @@ final class TranscriptionManager: ObservableObject {
         generations[episode.id] = generation
         tasks[episode.id] = Task { [weak self] in
             guard let self else { return }
-            var fallbackToWhisper = false
             do {
                 let stream: AsyncThrowingStream<TranscriptionBatch, Error>
                 switch engine {
@@ -92,9 +81,6 @@ final class TranscriptionManager: ObservableObject {
                     stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode,
                                                                               language: language,
                                                                               quality: quality)
-                case .systemSpeechAuto, .systemSpeechEnglish, .systemSpeechChinese, .systemSpeechJapanese, .systemSpeechKorean:
-                    stream = await SystemSpeechTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode,
-                                                                                   localeIdentifier: engine.systemSpeechLocale)
                 }
                 for try await batch in stream {
                     guard self.generations[episode.id] == generation else { return }
@@ -130,14 +116,8 @@ final class TranscriptionManager: ObservableObject {
                 state.segments = TranscriptCache.load(episodeID: episode.id) ?? state.segments
                 state.isRunning = false
                 state.isComplete = false
-                if engine.systemSpeechLocale != nil || engine == .systemSpeechAuto {
-                    fallbackToWhisper = true
-                    state.errorMessage = nil
-                    state.statusText = "Apple 系统识别不可用，正在切换到 Whisper 极速"
-                } else {
-                    state.errorMessage = error.localizedDescription
-                    state.statusText = nil
-                }
+                state.errorMessage = error.localizedDescription
+                state.statusText = nil
                 state.engine = engine
                 self.jobs[episode.id] = state
             }
@@ -146,13 +126,10 @@ final class TranscriptionManager: ObservableObject {
                 self.generations[episode.id] = nil
                 self.endBackgroundExecution(for: episode.id)
             }
-            if fallbackToWhisper {
-                self.start(episode: episode, audioURL: audioURL, engine: .whisperFast)
-            }
         }
     }
 
-    func retry(episode: Episode, audioURL: URL, engine: TranscriptionEngine = .scribe) {
+    func retry(episode: Episode, audioURL: URL, engine: TranscriptionEngine) {
         cancelCurrentTask(for: episode.id)
         start(episode: episode, audioURL: audioURL, engine: engine)
     }
@@ -162,7 +139,7 @@ final class TranscriptionManager: ObservableObject {
         start(episode: episode, audioURL: audioURL, engine: engine, force: true)
     }
 
-    func retranscribe(episode: Episode, audioURL: URL, from time: TimeInterval, engine: TranscriptionEngine = .scribe) {
+    func retranscribe(episode: Episode, audioURL: URL, from time: TimeInterval, engine: TranscriptionEngine) {
         cancelCurrentTask(for: episode.id)
         ScribeTranscriber.shared.clearCache(episodeID: episode.id)
         let retained = (TranscriptCache.load(episodeID: episode.id) ?? []).filter {
@@ -203,17 +180,6 @@ extension TranscriptionEngine {
         case .whisperBalanced: return .balanced
         case .whisperFastEnglish: return .fastEnglish
         case .whisperBalancedEnglish: return .balancedEnglish
-        case .systemSpeechAuto, .systemSpeechEnglish, .systemSpeechChinese, .systemSpeechJapanese, .systemSpeechKorean: return nil
-        }
-    }
-
-    var systemSpeechLocale: String? {
-        switch self {
-        case .systemSpeechEnglish: return "en-US"
-        case .systemSpeechChinese: return "zh-CN"
-        case .systemSpeechJapanese: return "ja-JP"
-        case .systemSpeechKorean: return "ko-KR"
-        default: return nil
         }
     }
 }

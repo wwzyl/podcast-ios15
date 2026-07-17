@@ -2,8 +2,6 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var store: LibraryStore
-    @EnvironmentObject private var downloads: EpisodeDownloadManager
-    @EnvironmentObject private var transcription: TranscriptionManager
 
     var body: some View {
         TabView {
@@ -16,15 +14,6 @@ struct RootView: View {
             NavigationView { MoreView().miniPlayerInset() }
                 .navigationViewStyle(.stack)
                 .tabItem { Label("更多", systemImage: "ellipsis") }
-        }
-        // 下载和转录的衔接放在 App 根视图，不能依赖播放页仍然存在。
-        .onReceive(downloads.$states) { states in
-            for podcast in store.podcasts {
-                for episode in podcast.episodes where episode.transcriptURL == nil {
-                    guard case .ready(let audioURL) = states[episode.id] else { continue }
-                    transcription.start(episode: episode, audioURL: audioURL)
-                }
-            }
         }
         .task { await store.repairMissingArtwork() }
     }

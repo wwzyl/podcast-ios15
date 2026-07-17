@@ -32,7 +32,6 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: CoreML.framework
       - sdk: MediaPlayer.framework
-      - sdk: Speech.framework
       - sdk: libsqlite3.tbd
     settings:
       base:

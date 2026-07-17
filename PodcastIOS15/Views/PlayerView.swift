@@ -167,13 +167,6 @@ private struct PlayerContentView: View {
                             Button("英语极速") { transcribeAudio(using: .whisperFastEnglish) }
                             Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
                         }
-                        Menu("使用 Apple 系统识别") {
-                            Button("自动语言") { transcribeAudio(using: .systemSpeechAuto) }
-                            Button("英语") { transcribeAudio(using: .systemSpeechEnglish) }
-                            Button("简体中文") { transcribeAudio(using: .systemSpeechChinese) }
-                            Button("日语") { transcribeAudio(using: .systemSpeechJapanese) }
-                            Button("韩语") { transcribeAudio(using: .systemSpeechKorean) }
-                        }
                     }.disabled(transcription.state(for: episode).isRunning)
                     Menu("从当前位置重新转写") {
                         Button("使用 Scribe v2") { retranscribeFromCurrent(using: .scribe) }
@@ -256,13 +249,6 @@ private struct PlayerContentView: View {
                         Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
                     }
                     .buttonStyle(.bordered)
-                    Menu("Apple 系统识别") {
-                        Button("自动语言") { transcribeAudio(using: .systemSpeechAuto) }
-                        Button("英语") { transcribeAudio(using: .systemSpeechEnglish) }
-                        Button("简体中文") { transcribeAudio(using: .systemSpeechChinese) }
-                        Button("日语") { transcribeAudio(using: .systemSpeechJapanese) }
-                        Button("韩语") { transcribeAudio(using: .systemSpeechKorean) }
-                    }.buttonStyle(.bordered)
                 }
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -306,13 +292,6 @@ private struct PlayerContentView: View {
                             Button("均衡（更准确）") { retryTranscription(using: .whisperBalanced) }
                             Button("英语极速") { retryTranscription(using: .whisperFastEnglish) }
                             Button("英语均衡（更准确）") { retryTranscription(using: .whisperBalancedEnglish) }
-                        }
-                        Menu("Apple 系统识别") {
-                            Button("自动语言") { retryTranscription(using: .systemSpeechAuto) }
-                            Button("英语") { retryTranscription(using: .systemSpeechEnglish) }
-                            Button("简体中文") { retryTranscription(using: .systemSpeechChinese) }
-                            Button("日语") { retryTranscription(using: .systemSpeechJapanese) }
-                            Button("韩语") { retryTranscription(using: .systemSpeechKorean) }
                         }
                     }
                 }

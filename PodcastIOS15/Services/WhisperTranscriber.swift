@@ -53,7 +53,12 @@ enum WhisperQuality: String, CaseIterable {
     }
 
     var installedEncoderFilename: String {
-        ((filename as NSString).deletingPathExtension) + "-encoder.mlmodelc"
+        switch self {
+        case .fast: return "ggml-base-encoder.mlmodelc"
+        case .balanced: return "ggml-small-encoder.mlmodelc"
+        case .fastEnglish: return "ggml-base.en-encoder.mlmodelc"
+        case .balancedEnglish: return "ggml-small.en-encoder.mlmodelc"
+        }
     }
 }
 
@@ -480,10 +485,18 @@ private struct WhisperModelStore {
         let minimumSize = quality == .balanced || quality == .balancedEnglish ? 150_000_000 : 50_000_000
         let modelReady = ((try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > minimumSize
         if !modelReady {
-            let data = try await ModelDataDownloader.download(sources(for: quality.filename)) { progress($0 * 0.72) }
-            guard data.count > minimumSize else { throw WhisperTranscriptionError.modelDownloadFailed }
-            do { try data.write(to: destination, options: .atomic) }
-            catch { throw WhisperTranscriptionError.modelDownloadFailed }
+            let partial = destination.appendingPathExtension("part")
+            try? FileManager.default.removeItem(at: partial)
+            do {
+                try await ModelDataDownloader.download(sources(for: quality.filename), to: partial) { progress($0 * 0.72) }
+                let size = (try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                guard size > minimumSize else { throw WhisperTranscriptionError.modelDownloadFailed }
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: partial, to: destination)
+            } catch {
+                try? FileManager.default.removeItem(at: partial)
+                throw WhisperTranscriptionError.modelDownloadFailed
+            }
         }
         try await ensureEncoder(for: quality, folder: folder) { encoderProgress in
             progress(0.72 + encoderProgress * 0.28)
@@ -499,10 +512,11 @@ private struct WhisperModelStore {
         let weights = destination.appendingPathComponent("weights/weight.bin")
         if FileManager.default.fileExists(atPath: weights.path) { progress(1); return }
 
-        let data = try await ModelDataDownloader.download(sources(for: archiveFilename), progress: progress)
-        guard data.count > 1_000_000 else { throw WhisperTranscriptionError.modelDownloadFailed }
         let archive = folder.appendingPathComponent(archiveFilename)
-        try data.write(to: archive, options: .atomic)
+        try? FileManager.default.removeItem(at: archive)
+        try await ModelDataDownloader.download(sources(for: archiveFilename), to: archive, progress: progress)
+        let archiveSize = (try? archive.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard archiveSize > 1_000_000 else { throw WhisperTranscriptionError.modelDownloadFailed }
         defer { try? FileManager.default.removeItem(at: archive) }
         let extracted = folder.appendingPathComponent((archiveFilename as NSString).deletingPathExtension, isDirectory: true)
         try? FileManager.default.removeItem(at: extracted)
@@ -515,8 +529,8 @@ private struct WhisperModelStore {
 
     private func sources(for filename: String) -> [URL] {
         [
-            URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(filename)?download=true")!,
-            URL(string: "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/\(filename)?download=true")!
+            URL(string: "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/\(filename)?download=true")!,
+            URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(filename)?download=true")!
         ]
     }
 }
@@ -544,24 +558,35 @@ enum WhisperModelCacheManager {
 }
 
 private final class ModelDataDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private var data = Data()
     private var expectedLength: Int64 = 0
-    private var continuation: CheckedContinuation<Data, Error>?
+    private var receivedLength: Int64 = 0
+    private var continuation: CheckedContinuation<Void, Error>?
     private var progress: (@Sendable (Double) -> Void)?
     private var session: URLSession?
+    private var fileHandle: FileHandle?
 
-    static func download(_ urls: [URL], progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+    static func download(_ urls: [URL], to destination: URL,
+                         progress: @escaping @Sendable (Double) -> Void) async throws {
         var lastError: Error = URLError(.cannotConnectToHost)
         for url in urls {
-            do { return try await download(url, progress: progress) }
-            catch { lastError = error }
+            try? FileManager.default.removeItem(at: destination)
+            do {
+                try await download(url, to: destination, progress: progress)
+                return
+            } catch {
+                lastError = error
+                try? FileManager.default.removeItem(at: destination)
+            }
         }
         throw lastError
     }
 
-    private static func download(_ url: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+    private static func download(_ url: URL, to destination: URL,
+                                 progress: @escaping @Sendable (Double) -> Void) async throws {
         let delegate = ModelDataDownloader()
         delegate.progress = progress
+        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        delegate.fileHandle = try FileHandle(forWritingTo: destination)
         return try await withCheckedThrowingContinuation { continuation in
             delegate.continuation = continuation
             let configuration = URLSessionConfiguration.ephemeral
@@ -582,21 +607,30 @@ private final class ModelDataDownloader: NSObject, URLSessionDataDelegate, @unch
             return
         }
         expectedLength = response.expectedContentLength
-        if expectedLength > 0 { data.reserveCapacity(Int(expectedLength)) }
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        self.data.append(data)
-        if expectedLength > 0 { progress?(min(1, Double(self.data.count) / Double(expectedLength))) }
+        do {
+            try fileHandle?.write(contentsOf: data)
+            receivedLength += Int64(data.count)
+            if expectedLength > 0 { progress?(min(1, Double(receivedLength) / Double(expectedLength))) }
+        } catch {
+            continuation?.resume(throwing: error)
+            continuation = nil
+            dataTask.cancel()
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        try? fileHandle?.close()
+        fileHandle = nil
         defer { self.session?.finishTasksAndInvalidate(); self.session = nil }
         guard let continuation else { return }
         self.continuation = nil
         if let error { continuation.resume(throwing: error) }
-        else { progress?(1); continuation.resume(returning: data) }
+        else if expectedLength > 0, receivedLength != expectedLength { continuation.resume(throwing: URLError(.cannotDecodeContentData)) }
+        else { progress?(1); continuation.resume() }
     }
 }
 

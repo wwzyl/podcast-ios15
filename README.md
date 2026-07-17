@@ -6,11 +6,13 @@
 
 - Apple Podcasts 搜索、底层 RSS 刷新和节目列表
 - 网络音频、后台/锁屏播放、进度记忆、倍速、15 秒跳转和逐句循环
-- Podcasting 2.0 transcript、SRT、WebVTT 和常见 JSON 文稿
-- 无文稿节目下载完成后自动使用 whisper.cpp + `ggml-base-q5_1` 在设备上离线、分批生成逐句稿；失败可从最后断点继续（模型已内置）
-- Microsoft Edge Translator 无密钥翻译流程（与 `scribe2srt` 相同）
+- Podcasting 2.0 transcript、SRT、WebVTT、TTML 和常见 JSON 文稿
+- 无文稿节目由用户选择 Scribe v2、Whisper 极速/均衡、英语专用 Whisper 或 Apple 系统语音识别，不再自动开始转录
+- Whisper 极速内置 `ggml-base-q5_1`；其他档位首次选择时由 App 自动下载并缓存，支持 Core ML、Metal 和 Silero VAD 静音过滤
+- DeepL、GPT 和 Microsoft 翻译路由，可关闭故障自动回退
 - 前一句 + 当前句 + 后一句的上下文翻译、全文翻译
-- 在线英文释义、iOS 系统词典、生词库和句子收藏
+- GPT 驱动的句子 AI 分析和词组 AI 解释
+- 在线英文释义、欧路词典、iOS 系统词典、生词库和句子收藏
 - CSV 和 Anki `.apkg` 导出
 - 最低部署版本 iOS 15.0
 
@@ -34,7 +36,7 @@ open PodcastIOS15.xcodeproj
 
 ## 文稿说明
 
-如果 RSS 单集包含 `podcast:transcript`，App 会自动载入；没有文稿时，整集音频下载完成后会自动开始离线 Whisper 转录，不需要再点“自动生成逐句稿”。完成句子和断点会持续缓存，失败后可以从最后断点继续。转录任务由 App 根节点持有，离开播放页或切换到生词页不会取消。也可以在“更多”页导入对应的 SRT/VTT/JSON。Whisper 模型约 60 MB，已作为 App 资源内置，不再运行时联网下载。
+如果 RSS 单集包含 `podcast:transcript`，App 会自动载入；没有文稿时只显示转录引擎选择，不会自动开始。完成句子和断点会持续缓存，失败后可以从最后断点继续。转录任务由 App 根节点持有，离开播放页或切换到生词页不会取消。也可以在“更多”页导入 SRT、VTT、TTML、XML 或 JSON。极速模型约 60 MB，已作为 App 资源内置；均衡和英语专用模型首次选择时自动下载到 App 私有缓存。
 
 Anki APKG 的生词卡导出生词、生词所在句子、句子原声、句子释义，以及该词在当前上下文中的释义；不会导出系统词典释义或播客来源。
 

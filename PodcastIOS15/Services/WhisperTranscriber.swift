@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import CoreML
 import whisper
 
 enum WhisperTranscriptionError: LocalizedError {
@@ -14,6 +15,24 @@ enum WhisperTranscriptionError: LocalizedError {
         case .transcriptionFailed: return "离线语音转写失败"
         }
     }
+}
+
+enum WhisperQuality: String, CaseIterable {
+    case fast
+    case balanced
+    case fastEnglish
+    case balancedEnglish
+
+    var filename: String {
+        switch self {
+        case .fast: return "ggml-base-q5_1.bin"
+        case .balanced: return "ggml-small-q5_1.bin"
+        case .fastEnglish: return "ggml-base.en-q5_1.bin"
+        case .balancedEnglish: return "ggml-small.en-q5_1.bin"
+        }
+    }
+
+    var language: String { self == .fastEnglish || self == .balancedEnglish ? "en" : "auto" }
 }
 
 struct TranscriptionBatch {
@@ -32,14 +51,16 @@ actor WhisperTranscriber {
     static let shared = WhisperTranscriber()
     private var context: OpaquePointer?
     private var contextUsesGPU = false
+    private var contextModelPath: String?
+    private var vad = SileroVAD()
 
     deinit { if let context { whisper_free(context) } }
 
-    func transcribeStream(audioURL: URL, episode: Episode, language: String = "auto") -> AsyncThrowingStream<TranscriptionBatch, Error> {
+    func transcribeStream(audioURL: URL, episode: Episode, language: String = "auto", quality: WhisperQuality = .fast) -> AsyncThrowingStream<TranscriptionBatch, Error> {
         AsyncThrowingStream { continuation in
             let producer = Task {
                 do {
-                    try await self.runTranscription(audioURL: audioURL, episode: episode, language: language, continuation: continuation)
+                    try await self.runTranscription(audioURL: audioURL, episode: episode, language: language, quality: quality, continuation: continuation)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -49,12 +70,18 @@ actor WhisperTranscriber {
         }
     }
 
-    private func runTranscription(audioURL: URL, episode: Episode, language: String, continuation: AsyncThrowingStream<TranscriptionBatch, Error>.Continuation) async throws {
-        let model = try await WhisperModelStore().modelURL()
+    private func runTranscription(audioURL: URL, episode: Episode, language: String, quality: WhisperQuality, continuation: AsyncThrowingStream<TranscriptionBatch, Error>.Continuation) async throws {
+        let model = try await WhisperModelStore().modelURL(for: quality)
+        if contextModelPath != model.path {
+            if let context { whisper_free(context) }
+            context = nil
+            contextModelPath = nil
+        }
         if context == nil {
             context = makeContext(model: model, useGPU: true)
             contextUsesGPU = context != nil
             if context == nil { context = makeContext(model: model, useGPU: false); contextUsesGPU = false }
+            if context != nil { contextModelPath = model.path }
         }
         guard context != nil else { throw WhisperTranscriptionError.modelInitializationFailed }
         let asset = AVURLAsset(url: audioURL)
@@ -97,6 +124,14 @@ actor WhisperTranscriber {
             while pending.count >= windowSize {
                 let chunk = Array(pending.prefix(windowSize))
                 let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
+                if !((try? vad.containsSpeech(in: chunk)) ?? true) {
+                    let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
+                    acceptedThrough = boundary
+                    continuation.yield(TranscriptionBatch(segments: [], progress: progress(at: boundary, duration: duration)))
+                    pending.removeFirst(stepSize)
+                    processedSamples += stepSize
+                    continue
+                }
                 let raw = try transcribeChunk(chunk, model: model, language: language, baseTime: baseTime)
                 try Task.checkCancellation()
                 let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
@@ -193,6 +228,53 @@ actor WhisperTranscriber {
     }
 }
 
+private final class SileroVAD {
+    private let model: MLModel?
+    private var hidden: MLMultiArray?
+    private var cell: MLMultiArray?
+
+    init() {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        if let url = Bundle.main.url(forResource: "silero-vad-unified-256ms-v6.0.0", withExtension: "mlmodelc") {
+            model = try? MLModel(contentsOf: url, configuration: configuration)
+        } else {
+            model = nil
+        }
+        hidden = try? MLMultiArray(shape: [1, 128], dataType: .float32)
+        cell = try? MLMultiArray(shape: [1, 128], dataType: .float32)
+    }
+
+    func containsSpeech(in samples: [Float]) throws -> Bool {
+        guard let model, var hidden, var cell else { return true }
+        let frameSize = 4_160
+        var speechFrames = 0
+        var testedFrames = 0
+        var offset = 0
+        while offset < samples.count {
+            let audio = try MLMultiArray(shape: [1, NSNumber(value: frameSize)], dataType: .float32)
+            let count = min(frameSize, samples.count - offset)
+            for index in 0..<frameSize { audio[index] = NSNumber(value: index < count ? samples[offset + index] : 0) }
+            let input = try MLDictionaryFeatureProvider(dictionary: [
+                "audio_input": MLFeatureValue(multiArray: audio),
+                "hidden_state": MLFeatureValue(multiArray: hidden),
+                "cell_state": MLFeatureValue(multiArray: cell)
+            ])
+            let output = try model.prediction(from: input)
+            if let probability = output.featureValue(for: "vad_output")?.multiArrayValue?[0].doubleValue,
+               probability >= 0.5 { speechFrames += 1 }
+            if let next = output.featureValue(for: "new_hidden_state")?.multiArrayValue { hidden = next }
+            if let next = output.featureValue(for: "new_cell_state")?.multiArrayValue { cell = next }
+            testedFrames += 1
+            if speechFrames >= 2 { self.hidden = hidden; self.cell = cell; return true }
+            offset += frameSize
+        }
+        self.hidden = hidden
+        self.cell = cell
+        return testedFrames > 0 && Double(speechFrames) / Double(testedFrames) >= 0.08
+    }
+}
+
 private struct SentenceAssembler {
     private var pending: TranscriptSegment?
     private let terminalPattern = #"[.!?。！？…][\"'”’)]*$"#
@@ -242,16 +324,22 @@ private struct SentenceAssembler {
 }
 
 private struct WhisperModelStore {
-    private let modelURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin?download=true")!
-    func modelURL() async throws -> URL {
-        if let bundled = Bundle.main.url(forResource: "ggml-base-q5_1", withExtension: "bin") {
+    func modelURL(for quality: WhisperQuality) async throws -> URL {
+        let name = (quality.filename as NSString).deletingPathExtension
+        if let bundled = Bundle.main.url(forResource: name, withExtension: "bin") {
             return bundled
         }
-        let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("Whisper", isDirectory: true)
+        let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true)
+            .appendingPathComponent("Whisper", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let destination = folder.appendingPathComponent("ggml-base-q5_1.bin")
-        if let size = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 50_000_000 { return destination }
-        let (temporary, response) = try await URLSession.shared.download(from: modelURL)
+        let destination = folder.appendingPathComponent(quality.filename)
+        let minimumSize = quality == .balanced || quality == .balancedEnglish ? 150_000_000 : 50_000_000
+        if let size = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > minimumSize {
+            return destination
+        }
+        let source = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(quality.filename)?download=true")!
+        let (temporary, response) = try await URLSession.shared.download(from: source)
         try validate(response)
         try? FileManager.default.removeItem(at: destination)
         do { try FileManager.default.moveItem(at: temporary, to: destination) }

@@ -93,6 +93,11 @@ jobs:
             echo "Bundled Core ML Whisper encoder is missing."
             exit 1
           fi
+          VAD="build/Build/Products/Release-iphoneos/PodcastIOS15.app/silero-vad-unified-256ms-v6.0.0.mlmodelc"
+          if [ ! -d "$VAD" ] || [ ! -f "$VAD/weights/weight.bin" ]; then
+            echo "Bundled Silero VAD model is missing."
+            exit 1
+          fi
           WORDS="build/Build/Products/Release-iphoneos/PodcastIOS15.app/words.sqlite"
           if [ ! -f "$WORDS" ]; then
             echo "Bundled COCA frequency database is missing."

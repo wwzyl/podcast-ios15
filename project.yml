@@ -23,6 +23,8 @@ targets:
         buildPhase: resources
       - path: PodcastIOS15/Resources/Models/ggml-base-q5_1-encoder.mlmodelc
         buildPhase: resources
+      - path: PodcastIOS15/Resources/Models/silero-vad-unified-256ms-v6.0.0.mlmodelc
+        buildPhase: resources
     dependencies:
       - package: ZIPFoundation
       - framework: Vendor/whisper.xcframework
@@ -30,6 +32,7 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: CoreML.framework
       - sdk: MediaPlayer.framework
+      - sdk: Speech.framework
       - sdk: libsqlite3.tbd
     settings:
       base:

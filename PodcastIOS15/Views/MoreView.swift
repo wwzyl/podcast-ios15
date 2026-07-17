@@ -23,11 +23,17 @@ struct MoreView: View {
                     Text("한국어").tag("ko")
                     Text("Español").tag("es")
                 }
+                Picker("翻译服务", selection: $store.translationProvider) {
+                    ForEach(TranslationProvider.allCases) { provider in
+                        Text(provider.title).tag(provider.rawValue)
+                    }
+                }
+                Toggle("服务失败时自动回退", isOn: $store.translationFallbackEnabled)
                 HStack(alignment: .top) {
                     Image(systemName: "character.bubble")
-                    Text("整句翻译使用 Microsoft Edge Translator；所选词的语境义可在下方启用与官方相同思路的 GPT 上下文释义。")
+                    Text("可选择 DeepL、GPT 或 Microsoft；关闭自动回退后不会静默切换翻译服务。")
                 }.font(.caption).foregroundColor(.secondary)
-                NavigationLink("上下文释义服务") { ContextDefinitionSettingsView() }
+                NavigationLink("翻译与上下文释义设置") { ContextDefinitionSettingsView() }
             }
             Section("播放") {
                 Label("支持后台与锁屏播放", systemImage: "lock.iphone")
@@ -81,6 +87,10 @@ private struct ContextDefinitionSettingsView: View {
 
     var body: some View {
         Form {
+            Section("DeepL") {
+                SecureField("DeepL API Key", text: $store.deeplAPIKey)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+            }
             Section {
                 Toggle("使用 GPT 上下文释义", isOn: $store.contextGPTEnabled)
             } footer: {

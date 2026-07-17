@@ -4,12 +4,20 @@ import UIKit
 
 enum TranscriptionEngine: String, CaseIterable {
     case scribe
-    case whisper
+    case whisperFast
+    case whisperBalanced
+    case whisperFastEnglish
+    case whisperBalancedEnglish
+    case systemSpeech
 
     var title: String {
         switch self {
         case .scribe: return "Scribe v2"
-        case .whisper: return "Whisper"
+        case .whisperFast: return "Whisper 极速"
+        case .whisperBalanced: return "Whisper 均衡"
+        case .whisperFastEnglish: return "Whisper 英语极速"
+        case .whisperBalancedEnglish: return "Whisper 英语均衡"
+        case .systemSpeech: return "Apple 系统识别"
         }
     }
 }
@@ -67,8 +75,12 @@ final class TranscriptionManager: ObservableObject {
                 switch engine {
                 case .scribe:
                     stream = await ScribeTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
-                case .whisper:
-                    stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
+                case .whisperFast, .whisperBalanced, .whisperFastEnglish, .whisperBalancedEnglish:
+                    stream = await WhisperTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode,
+                                                                              language: engine.whisperQuality?.language ?? "auto",
+                                                                              quality: engine.whisperQuality ?? .fast)
+                case .systemSpeech:
+                    stream = await SystemSpeechTranscriber.shared.transcribeStream(audioURL: audioURL, episode: episode)
                 }
                 for try await batch in stream {
                     guard self.generations[episode.id] == generation else { return }
@@ -151,5 +163,18 @@ final class TranscriptionManager: ObservableObject {
     private func endBackgroundExecution(for episodeID: String) {
         guard let identifier = backgroundTasks.removeValue(forKey: episodeID), identifier != .invalid else { return }
         UIApplication.shared.endBackgroundTask(identifier)
+    }
+}
+
+extension TranscriptionEngine {
+    var whisperQuality: WhisperQuality? {
+        switch self {
+        case .scribe: return nil
+        case .whisperFast: return .fast
+        case .whisperBalanced: return .balanced
+        case .whisperFastEnglish: return .fastEnglish
+        case .whisperBalancedEnglish: return .balancedEnglish
+        case .systemSpeech: return nil
+        }
     }
 }

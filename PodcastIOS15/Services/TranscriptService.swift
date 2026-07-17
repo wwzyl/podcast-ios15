@@ -23,7 +23,14 @@ struct TranscriptService {
         let lower = type.lowercased()
         if lower.contains("json") { return try parseJSON(data) }
         guard let value = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else { throw TranscriptError.unsupported }
-        let result = lower.contains("vtt") || value.hasPrefix("WEBVTT") ? parseVTT(value) : parseSRT(value)
+        let result: [TranscriptSegment]
+        if lower.contains("ttml") || lower.contains("xml") || value.contains("<tt") {
+            result = try TTMLTranscriptParser.parse(data)
+        } else if lower.contains("vtt") || value.hasPrefix("WEBVTT") {
+            result = parseVTT(value)
+        } else {
+            result = parseSRT(value)
+        }
         guard !result.isEmpty else { throw TranscriptError.empty }
         return result
     }
@@ -71,6 +78,72 @@ struct TranscriptService {
     private static func parseTimestamp(_ source: String) -> TimeInterval? {
         let clean = source.trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? source
         let parts = clean.replacingOccurrences(of: ",", with: ".").split(separator: ":").compactMap { Double($0) }
+        guard !parts.isEmpty else { return nil }
+        return parts.reversed().enumerated().reduce(0) { $0 + $1.element * pow(60, Double($1.offset)) }
+    }
+}
+
+private final class TTMLTranscriptParser: NSObject, XMLParserDelegate {
+    private var segments: [TranscriptSegment] = []
+    private var paragraphText = ""
+    private var paragraphStart: TimeInterval?
+    private var paragraphEnd: TimeInterval?
+    private var insideParagraph = false
+    private var parseError: Error?
+
+    static func parse(_ data: Data) throws -> [TranscriptSegment] {
+        let delegate = TTMLTranscriptParser()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        guard parser.parse() else { throw delegate.parseError ?? parser.parserError ?? TranscriptError.unsupported }
+        guard !delegate.segments.isEmpty else { throw TranscriptError.empty }
+        return delegate.segments
+    }
+
+    func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) { self.parseError = parseError }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        let name = (qName ?? elementName).split(separator: ":").last?.lowercased() ?? ""
+        if name == "p" {
+            insideParagraph = true
+            paragraphText = ""
+            paragraphStart = Self.time(attributeDict["begin"] ?? attributeDict.first { $0.key.hasSuffix(":begin") }?.value)
+            paragraphEnd = Self.time(attributeDict["end"] ?? attributeDict.first { $0.key.hasSuffix(":end") }?.value)
+            if paragraphEnd == nil, let duration = Self.time(attributeDict["dur"]), let start = paragraphStart {
+                paragraphEnd = start + duration
+            }
+        } else if insideParagraph, name == "br" {
+            paragraphText += " "
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if insideParagraph { paragraphText += string }
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if insideParagraph { paragraphText += String(data: CDATABlock, encoding: .utf8) ?? "" }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let name = (qName ?? elementName).split(separator: ":").last?.lowercased() ?? ""
+        guard name == "p", insideParagraph else { return }
+        insideParagraph = false
+        let text = paragraphText.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let start = paragraphStart, !text.isEmpty {
+            segments.append(TranscriptSegment(start: start, end: paragraphEnd, text: text))
+        }
+    }
+
+    private static func time(_ raw: String?) -> TimeInterval? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasSuffix("ms"), let number = Double(value.dropLast(2)) { return number / 1_000 }
+        if value.hasSuffix("s"), let number = Double(value.dropLast()) { return number }
+        if value.hasSuffix("m"), let number = Double(value.dropLast()) { return number * 60 }
+        if value.hasSuffix("h"), let number = Double(value.dropLast()) { return number * 3_600 }
+        let parts = value.replacingOccurrences(of: ",", with: ".").split(separator: ":").compactMap { Double($0) }
         guard !parts.isEmpty else { return nil }
         return parts.reversed().enumerated().reduce(0) { $0 + $1.element * pow(60, Double($1.offset)) }
     }

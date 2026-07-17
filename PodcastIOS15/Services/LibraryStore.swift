@@ -15,6 +15,9 @@ final class LibraryStore: ObservableObject {
     @Published var contextGPTBaseURL = "https://api.openai.com/v1" { didSet { UserDefaults.standard.set(contextGPTBaseURL, forKey: "contextGPTBaseURL") } }
     @Published var contextGPTAPIKey = "" { didSet { UserDefaults.standard.set(contextGPTAPIKey, forKey: "contextGPTAPIKey") } }
     @Published var contextGPTModel = "gpt-4o-mini" { didSet { UserDefaults.standard.set(contextGPTModel, forKey: "contextGPTModel") } }
+    @Published var translationProvider = TranslationProvider.microsoft.rawValue { didSet { UserDefaults.standard.set(translationProvider, forKey: "translationProvider") } }
+    @Published var translationFallbackEnabled = true { didSet { UserDefaults.standard.set(translationFallbackEnabled, forKey: "translationFallbackEnabled") } }
+    @Published var deeplAPIKey = "" { didSet { UserDefaults.standard.set(deeplAPIKey, forKey: "deeplAPIKey") } }
     private var repairingArtwork = false
 
     private let decoder: JSONDecoder = {
@@ -35,8 +38,20 @@ final class LibraryStore: ObservableObject {
         contextGPTBaseURL = UserDefaults.standard.string(forKey: "contextGPTBaseURL") ?? "https://api.openai.com/v1"
         contextGPTAPIKey = UserDefaults.standard.string(forKey: "contextGPTAPIKey") ?? ""
         contextGPTModel = UserDefaults.standard.string(forKey: "contextGPTModel") ?? "gpt-4o-mini"
+        translationProvider = UserDefaults.standard.string(forKey: "translationProvider") ?? TranslationProvider.microsoft.rawValue
+        translationFallbackEnabled = UserDefaults.standard.object(forKey: "translationFallbackEnabled") as? Bool ?? true
+        deeplAPIKey = UserDefaults.standard.string(forKey: "deeplAPIKey") ?? ""
         podcasts = load([Podcast].self, name: "podcasts.json") ?? []
         vocabulary = load([VocabularyItem].self, name: "vocabulary.json") ?? []
+    }
+
+    var translationConfiguration: TranslationConfiguration {
+        TranslationConfiguration(provider: TranslationProvider(rawValue: translationProvider) ?? .microsoft,
+                                 allowFallback: translationFallbackEnabled,
+                                 deeplAPIKey: deeplAPIKey,
+                                 gptBaseURL: contextGPTBaseURL,
+                                 gptAPIKey: contextGPTAPIKey,
+                                 gptModel: contextGPTModel)
     }
 
     func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil) async throws {
@@ -126,7 +141,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func importFile(_ url: URL) {
-        let allowed = ["srt", "vtt", "json"]
+        let allowed = ["srt", "vtt", "json", "ttml", "xml"]
         guard allowed.contains(url.pathExtension.lowercased()) else { return }
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }

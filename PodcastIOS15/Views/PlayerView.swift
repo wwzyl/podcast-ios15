@@ -37,6 +37,7 @@ private struct PlayerContentView: View {
     @State private var loadingText = true
     @State private var errorText: String?
     @State private var lookupRequest: WordLookupRequest?
+    @State private var analysisRequest: AIAnalysisRequest?
     @State private var translatingAll = false
     @State private var preparingAudio = false
     @State private var followPlayback = true
@@ -84,6 +85,11 @@ private struct PlayerContentView: View {
                                                                                       next: index + 1 < segments.count ? segments[index + 1].text : nil)
                                                  },
                                                  favorite: { saveSentence(segment) },
+                                                 analyze: {
+                                                     analysisRequest = AIAnalysisRequest(segment: segment,
+                                                                                         previous: index > 0 ? segments[index - 1].text : nil,
+                                                                                         next: index + 1 < segments.count ? segments[index + 1].text : nil)
+                                                 },
                                                  bookmarked: bookmarkedTexts.contains(segment.text),
                                                  toggleBookmark: { toggleBookmark(segment) })
                                         .id(segment.id)
@@ -142,11 +148,23 @@ private struct PlayerContentView: View {
                     Button { translateAll() } label: { Label("翻译全文", systemImage: "character.bubble") }.disabled(translatingAll || segments.isEmpty)
                     Menu("从头重新转写") {
                         Button("使用 Scribe v2") { transcribeAudio(using: .scribe) }
-                        Button("使用 Whisper") { transcribeAudio(using: .whisper) }
+                        Menu("使用 Whisper") {
+                            Button("极速") { transcribeAudio(using: .whisperFast) }
+                            Button("均衡（更准确）") { transcribeAudio(using: .whisperBalanced) }
+                            Button("英语极速") { transcribeAudio(using: .whisperFastEnglish) }
+                            Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
+                        }
+                        Button("使用 Apple 系统识别") { transcribeAudio(using: .systemSpeech) }
                     }.disabled(transcription.state(for: episode).isRunning)
                     Menu("从当前位置重新转写") {
                         Button("使用 Scribe v2") { retranscribeFromCurrent(using: .scribe) }
-                        Button("使用 Whisper") { retranscribeFromCurrent(using: .whisper) }
+                        Menu("使用 Whisper") {
+                            Button("极速") { retranscribeFromCurrent(using: .whisperFast) }
+                            Button("均衡（更准确）") { retranscribeFromCurrent(using: .whisperBalanced) }
+                            Button("英语极速") { retranscribeFromCurrent(using: .whisperFastEnglish) }
+                            Button("英语均衡（更准确）") { retranscribeFromCurrent(using: .whisperBalancedEnglish) }
+                        }
+                        Button("使用 Apple 系统识别") { retranscribeFromCurrent(using: .systemSpeech) }
                     }.disabled(transcription.state(for: episode).isRunning)
                     Divider()
                     Button { player.playPrevious() } label: { Label("播放上一集", systemImage: "backward.end") }
@@ -163,6 +181,9 @@ private struct PlayerContentView: View {
         .searchable(text: $searchText, prompt: "搜索文稿")
         .sheet(item: $lookupRequest) { request in
             WordLearningView(episode: episode, request: request)
+        }
+        .sheet(item: $analysisRequest) { request in
+            AIAnalysisView(request: request)
         }
         .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
         .onAppear {
@@ -184,7 +205,7 @@ private struct PlayerContentView: View {
         VStack(spacing: 15) {
             Image(systemName: "captions.bubble").font(.system(size: 55)).foregroundColor(AppTheme.purple)
             Text("这一集没有附带逐句文本").font(.title3.bold())
-            Text("下载完成后会自动识别语言并使用 Scribe v2 生成逐句稿；失败后可断点重试或改用离线 Whisper。")
+            Text("请选择使用云端 Scribe v2，或本地 Whisper 极速/均衡模式生成逐句稿。")
                 .multilineTextAlignment(.center).foregroundColor(.secondary)
             if transcription.state(for: episode).isRunning {
                 VStack(spacing: 8) {
@@ -195,7 +216,19 @@ private struct PlayerContentView: View {
             } else if transcription.state(for: episode).errorMessage != nil {
                 EmptyView()
             } else {
-                Button("使用 Scribe v2 生成逐句稿") { transcribeAudio(using: .scribe) }.buttonStyle(.borderedProminent)
+                HStack {
+                    Button("Scribe v2") { transcribeAudio(using: .scribe) }
+                        .buttonStyle(.borderedProminent)
+                    Menu("Whisper") {
+                        Button("极速") { transcribeAudio(using: .whisperFast) }
+                        Button("均衡（更准确）") { transcribeAudio(using: .whisperBalanced) }
+                        Button("英语极速") { transcribeAudio(using: .whisperFastEnglish) }
+                        Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Apple 系统识别") { transcribeAudio(using: .systemSpeech) }
+                        .buttonStyle(.bordered)
+                }
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -233,8 +266,13 @@ private struct PlayerContentView: View {
                     HStack {
                         Button("重试 Scribe") { retryTranscription(using: .scribe) }
                             .buttonStyle(.borderedProminent)
-                        Button("改用 Whisper") { retryTranscription(using: .whisper) }
-                            .buttonStyle(.bordered)
+                        Menu("改用 Whisper") {
+                            Button("极速") { retryTranscription(using: .whisperFast) }
+                            Button("均衡（更准确）") { retryTranscription(using: .whisperBalanced) }
+                            Button("英语极速") { retryTranscription(using: .whisperFastEnglish) }
+                            Button("英语均衡（更准确）") { retryTranscription(using: .whisperBalancedEnglish) }
+                        }
+                        Button("Apple 系统识别") { retryTranscription(using: .systemSpeech) }
                     }
                 }
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -247,13 +285,9 @@ private struct PlayerContentView: View {
 
     private func prepareAudio(retry: Bool = false) {
         if player.episode?.id == episode.id {
-            if episode.transcriptURL == nil, let audioURL = downloads.localURL(for: episode) {
-                transcription.start(episode: episode, audioURL: audioURL)
-            } else if downloads.localURL(for: episode) == nil {
+            if downloads.localURL(for: episode) == nil {
                 Task {
-                    if let audioURL = try? await downloads.download(episode), episode.transcriptURL == nil {
-                        transcription.start(episode: episode, audioURL: audioURL)
-                    }
+                    _ = try? await downloads.download(episode)
                 }
             }
             return
@@ -263,9 +297,6 @@ private struct PlayerContentView: View {
             do {
                 let url = retry ? try await downloads.retry(episode) : try await downloads.download(episode)
                 player.load(episode, sourceURL: url)
-                if episode.transcriptURL == nil {
-                    transcription.start(episode: episode, audioURL: url)
-                }
             } catch {
                 errorText = "音频准备失败：\(error.localizedDescription)"
             }
@@ -278,11 +309,10 @@ private struct PlayerContentView: View {
         Task {
             if let local = store.importedTranscript ?? TranscriptCache.load(episodeID: episode.id), !local.isEmpty {
                 segments = local
-                if !TranscriptCache.isComplete(episodeID: episode.id) { startAutomaticTranscription() }
             } else {
                 do { segments = try await TranscriptService().load(for: episode) }
-                catch TranscriptError.empty { segments = []; startAutomaticTranscription() }
-                catch { segments = []; errorText = error.localizedDescription; startAutomaticTranscription() }
+                catch TranscriptError.empty { segments = [] }
+                catch { segments = []; errorText = error.localizedDescription }
             }
             loadingText = false
         }
@@ -305,15 +335,6 @@ private struct PlayerContentView: View {
                 let audioURL = try await downloads.download(episode)
                 transcription.retry(episode: episode, audioURL: audioURL, engine: engine)
             } catch { errorText = "重试转录失败：\(error.localizedDescription)" }
-        }
-    }
-
-    private func startAutomaticTranscription() {
-        Task {
-            do {
-                let audioURL = try await downloads.download(episode)
-                transcription.start(episode: episode, audioURL: audioURL)
-            } catch { errorText = "自动转录准备失败：\(error.localizedDescription)" }
         }
     }
 
@@ -349,11 +370,10 @@ private struct PlayerContentView: View {
         guard segments.indices.contains(index) else { return }
         Task {
             do {
-                let result = try await MicrosoftTranslator.shared.translateWithContext(
-                    previous: index > 0 ? segments[index - 1].text : nil,
-                    current: segments[index].text,
-                    next: index + 1 < segments.count ? segments[index + 1].text : nil,
-                    to: store.targetLanguage)
+                let result = try await TranslationService.shared.translate(
+                    segments[index].text,
+                    to: store.targetLanguage,
+                    configuration: store.translationConfiguration)
                 segments[index].translation = result
             } catch { errorText = "翻译失败：\(error.localizedDescription)" }
         }
@@ -363,15 +383,11 @@ private struct PlayerContentView: View {
         translatingAll = true
         Task {
             do {
-                let contexts = segments.indices.map { index in
-                    [index > 0 ? segments[index - 1].text : nil, segments[index].text, index + 1 < segments.count ? segments[index + 1].text : nil]
-                        .compactMap { $0 }.joined(separator: "\n")
-                }
-                let values = try await MicrosoftTranslator.shared.translateBatch(contexts, to: store.targetLanguage)
                 for index in segments.indices {
-                    let lines = values[index].split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-                    let position = index > 0 ? 1 : 0
-                    segments[index].translation = lines.indices.contains(position) ? lines[position] : values[index]
+                    segments[index].translation = try await TranslationService.shared.translate(
+                        segments[index].text,
+                        to: store.targetLanguage,
+                        configuration: store.translationConfiguration)
                 }
             } catch { errorText = "全文翻译失败：\(error.localizedDescription)" }
             translatingAll = false
@@ -388,7 +404,7 @@ private struct PlayerContentView: View {
                 let itemID = UUID()
                 let clip = try await AudioClipStore.create(from: sourceURL, itemID: itemID, start: segment.start, end: segment.end)
                 var translated = segment.translation ?? ""
-                if translated.isEmpty { translated = (try? await MicrosoftTranslator.shared.translate(segment.text, to: store.targetLanguage)) ?? "" }
+                if translated.isEmpty { translated = (try? await TranslationService.shared.translate(segment.text, to: store.targetLanguage, configuration: store.translationConfiguration)) ?? "" }
                 store.addVocabulary(VocabularyItem(id: itemID, word: "★ 收藏句子", sentence: segment.text, sentenceTranslation: translated, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: segment.start, audioClipFilename: clip))
             } catch { errorText = "收藏原声句子失败：\(error.localizedDescription)" }
         }
@@ -405,6 +421,69 @@ private struct TranscriptViewportHeightPreferenceKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
+private struct AIAnalysisRequest: Identifiable {
+    let id = UUID()
+    let segment: TranscriptSegment
+    let previous: String?
+    let next: String?
+}
+
+private struct AIAnalysisView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: LibraryStore
+    let request: AIAnalysisRequest
+    @State private var result = ""
+    @State private var loading = true
+    @State private var errorText: String?
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(request.segment.text)
+                        .font(.title3)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Divider()
+                    if loading {
+                        HStack { ProgressView(); Text("正在分析…") }.frame(maxWidth: .infinity)
+                    } else if let errorText {
+                        Label(errorText, systemImage: "exclamationmark.triangle")
+                            .foregroundColor(.orange)
+                    } else {
+                        Text(result).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                }.padding(18)
+            }
+            .navigationTitle("AI 分析").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("重新分析") { analyze() }.disabled(loading) }
+            }
+            .onAppear { analyze() }
+        }
+    }
+
+    private func analyze() {
+        loading = true
+        errorText = nil
+        Task {
+            do {
+                result = try await AIAnalysisService().analyze(
+                    kind: .sentence,
+                    previous: request.previous,
+                    sentence: request.segment.text,
+                    next: request.next,
+                    outputLanguage: store.targetLanguage,
+                    configuration: ContextDefinitionConfiguration(enabled: true,
+                                                                  baseURL: store.contextGPTBaseURL,
+                                                                  apiKey: store.contextGPTAPIKey,
+                                                                  model: store.contextGPTModel))
+            } catch { errorText = "分析失败：\(error.localizedDescription)" }
+            loading = false
+        }
+    }
+}
+
 private struct SentenceRow: View {
     let segment: TranscriptSegment
     let active: Bool
@@ -412,6 +491,7 @@ private struct SentenceRow: View {
     let translate: () -> Void
     let learn: (String) -> Void
     let favorite: () -> Void
+    let analyze: () -> Void
     let bookmarked: Bool
     let toggleBookmark: () -> Void
 
@@ -422,6 +502,7 @@ private struct SentenceRow: View {
                 Spacer()
                 Menu {
                     Button(action: translate) { Label("翻译这句话", systemImage: "character.bubble") }
+                    Button(action: analyze) { Label("AI 分析", systemImage: "sparkles") }
                     Button { learn("") } label: { Label("查词并加入生词", systemImage: "text.magnifyingglass") }
                     Button(action: favorite) { Label("收藏句子", systemImage: "bookmark") }
                     Button(action: toggleBookmark) { Label(bookmarked ? "移除书签" : "添加书签", systemImage: bookmarked ? "bookmark.slash" : "bookmark.fill") }
@@ -495,6 +576,7 @@ private struct WordLearningView: View {
     @State private var contextMeaningSource = ""
     @State private var frequency: WordFrequency?
     @State private var loading = false
+    @State private var aiExplaining = false
     @State private var showSystemDictionary = false
     @State private var errorText: String?
 
@@ -537,6 +619,11 @@ private struct WordLearningView: View {
                         HStack { Spacer(); if loading { ProgressView() }; Text(loading ? "正在结合上下文查询…" : "查询语境词义"); Spacer() }
                     }
                     .buttonStyle(.borderedProminent).disabled(word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loading)
+                    Button { explainWithAI() } label: {
+                        HStack { Spacer(); if aiExplaining { ProgressView() }; Label(aiExplaining ? "正在解释…" : "AI 解释", systemImage: "sparkles"); Spacer() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || aiExplaining)
                     }
 
                     if !translation.isEmpty {
@@ -562,6 +649,8 @@ private struct WordLearningView: View {
                     if !word.isEmpty {
                         resultCard(title: "更多词典", systemImage: "globe", color: .green) {
                             HStack {
+                                Button("欧路词典") { openEudic() }
+                                Spacer()
                                 Button("系统词典") { showSystemDictionary = true }
                                 Spacer()
                                 Link("Cambridge", destination: dictionaryURL("https://dictionary.cambridge.org/dictionary/english-chinese-simplified/"))
@@ -609,7 +698,7 @@ private struct WordLearningView: View {
         Task {
             let result = try? await DictionaryService().lookup(selected)
             let resolvedSentenceTranslation = sentenceTranslation.isEmpty
-                ? ((try? await MicrosoftTranslator.shared.translate(request.segment.text, to: store.targetLanguage)) ?? "")
+                ? ((try? await TranslationService.shared.translate(request.segment.text, to: store.targetLanguage, configuration: store.translationConfiguration)) ?? "")
                 : sentenceTranslation
             let configuration = ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
                                                                baseURL: store.contextGPTBaseURL,
@@ -638,6 +727,29 @@ private struct WordLearningView: View {
                 errorText = "未查询到结果，请检查网络或换用系统词典。"
             }
             loading = false
+        }
+    }
+
+    private func explainWithAI() {
+        let selected = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty else { return }
+        aiExplaining = true
+        errorText = nil
+        Task {
+            do {
+                translation = try await AIAnalysisService().analyze(
+                    kind: .expression(selected),
+                    previous: request.previous,
+                    sentence: request.segment.text,
+                    next: request.next,
+                    outputLanguage: store.targetLanguage,
+                    configuration: ContextDefinitionConfiguration(enabled: true,
+                                                                  baseURL: store.contextGPTBaseURL,
+                                                                  apiKey: store.contextGPTAPIKey,
+                                                                  model: store.contextGPTModel))
+                contextMeaningSource = "AI 解释"
+            } catch { errorText = "AI 解释失败：\(error.localizedDescription)" }
+            aiExplaining = false
         }
     }
 
@@ -675,7 +787,7 @@ private struct WordLearningView: View {
             if savedFrequency == nil { savedFrequency = WordFrequencyService().lookup(selected) }
             var savedSentenceTranslation = sentenceTranslation
             if savedSentenceTranslation.isEmpty {
-                savedSentenceTranslation = (try? await MicrosoftTranslator.shared.translate(request.segment.text, to: store.targetLanguage)) ?? ""
+                savedSentenceTranslation = (try? await TranslationService.shared.translate(request.segment.text, to: store.targetLanguage, configuration: store.translationConfiguration)) ?? ""
             }
             do {
                 let itemID = UUID()
@@ -693,6 +805,16 @@ private struct WordLearningView: View {
     private func dictionaryURL(_ base: String) -> URL {
         let encoded = word.trimmingCharacters(in: .whitespacesAndNewlines).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? word
         return URL(string: base + encoded)!
+    }
+
+    private func openEudic() {
+        let value = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        let encoded = value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+        guard let appURL = URL(string: "eudic://dict/\(encoded)") else { return }
+        UIApplication.shared.open(appURL, options: [:]) { opened in
+            guard !opened, let webURL = URL(string: "https://dict.eudic.net/dicts/en/\(encoded)") else { return }
+            UIApplication.shared.open(webURL)
+        }
     }
 }
 

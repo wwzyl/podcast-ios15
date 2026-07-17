@@ -45,6 +45,7 @@ struct VocabularyItem: Identifiable, Codable, Hashable {
     var phonetic: String?
     var definition: String
     var translation: String
+    var aiExplanation: String?
     var sentence: String
     var sentenceTranslation: String
     var podcastTitle: String
@@ -54,12 +55,13 @@ struct VocabularyItem: Identifiable, Codable, Hashable {
     var frequencyRank: Int?
     var createdAt: Date
 
-    init(id: UUID = UUID(), word: String, phonetic: String? = nil, definition: String = "", translation: String = "", sentence: String, sentenceTranslation: String = "", podcastTitle: String, episodeTitle: String, timestamp: TimeInterval, audioClipFilename: String? = nil, frequencyRank: Int? = nil, createdAt: Date = Date()) {
+    init(id: UUID = UUID(), word: String, phonetic: String? = nil, definition: String = "", translation: String = "", aiExplanation: String? = nil, sentence: String, sentenceTranslation: String = "", podcastTitle: String, episodeTitle: String, timestamp: TimeInterval, audioClipFilename: String? = nil, frequencyRank: Int? = nil, createdAt: Date = Date()) {
         self.id = id
         self.word = word
         self.phonetic = phonetic
         self.definition = definition
         self.translation = translation
+        self.aiExplanation = aiExplanation
         self.sentence = sentence
         self.sentenceTranslation = sentenceTranslation
         self.podcastTitle = podcastTitle

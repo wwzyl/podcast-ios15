@@ -32,8 +32,8 @@ enum AnkiTemplateType: String, CaseIterable, Identifiable {
 struct VocabularyExporter {
     func csv(_ items: [VocabularyItem]) throws -> URL {
         let url = temporaryURL("PodcastIOS15_Vocabulary.csv")
-        let header = ["Word", "Phonetic", "Translation", "Definition", "Sentence", "Sentence Translation", "Podcast", "Episode", "Timestamp", "COCA Rank"]
-        let rows = items.map { [$0.word, $0.phonetic ?? "", $0.translation, $0.definition, $0.sentence, $0.sentenceTranslation, $0.podcastTitle, $0.episodeTitle, $0.timestamp.clockString, $0.frequencyRank.map { String($0) } ?? ""] }
+        let header = ["Word", "Phonetic", "Translation", "AI Explanation", "Definition", "Sentence", "Sentence Translation", "Podcast", "Episode", "Timestamp", "COCA Rank"]
+        let rows = items.map { [$0.word, $0.phonetic ?? "", $0.translation, $0.aiExplanation ?? "", $0.definition, $0.sentence, $0.sentenceTranslation, $0.podcastTitle, $0.episodeTitle, $0.timestamp.clockString, $0.frequencyRank.map { String($0) } ?? ""] }
         let text = ([header] + rows).map { $0.map(csvField).joined(separator: ",") }.joined(separator: "\r\n")
         try ("\u{FEFF}" + text).write(to: url, atomically: true, encoding: .utf8)
         return url
@@ -93,7 +93,7 @@ struct VocabularyExporter {
         let cardFormats = formats(for: templateType)
         let template: [String: Any] = ["name": templateType.title, "ord": 0, "qfmt": cardFormats.question, "afmt": cardFormats.answer, "bqfmt": "", "bafmt": "", "bfont": "", "bsize": 0, "did": NSNull()]
         // 四项文字内容加原句音频；不导出播客来源或系统词典释义。
-        let fieldNames = ["Word", "Sentence", "SentenceTranslation", "ContextMeaning", "SentenceAudio"]
+        let fieldNames = ["Word", "Sentence", "SentenceTranslation", "ContextMeaning", "AIExplanation", "SentenceAudio"]
         let fields: [[String: Any]] = fieldNames.enumerated().map {
             ["name": $0.element, "ord": $0.offset, "sticky": false, "rtl": false, "font": "Arial", "size": 20, "media": []]
         }
@@ -122,7 +122,7 @@ struct VocabularyExporter {
             let cardID = stableID("card|\(templateType.rawValue)|\(fingerprint)")
             let cloze = clozeSentence(for: item, type: templateType)
             let exportedSentence = templateType == .questionAnswer ? item.sentence : cloze
-            let noteFields = [item.word, exportedSentence, item.sentenceTranslation, item.translation, audioFields[item.id] ?? ""]
+            let noteFields = [item.word, exportedSentence, item.sentenceTranslation, item.translation, item.aiExplanation ?? "", audioFields[item.id] ?? ""]
             let fields = noteFields.map(htmlPreservingAnkiMarkup).joined(separator: "\u{1f}")
             let checksum = sha1Checksum(item.word)
             try execute(database, "INSERT INTO notes VALUES (\(noteID),'\(stableGUID(fingerprint))',\(modelID),\(now),-1,' ','\(sql(fields))','\(sql(item.word))',\(checksum),0,'');")
@@ -152,22 +152,23 @@ struct VocabularyExporter {
     }
     private func formats(for type: AnkiTemplateType) -> (question: String, answer: String) {
         let wordFront = "<div class=\"word\">{{Word}}</div><div class=\"sentence\">{{Sentence}} {{SentenceAudio}}</div>"
-        let wordBack = "{{FrontSide}}<hr><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>"
+        let aiBack = "<div class=\"label\">AI 解释</div><div class=\"context-meaning\">{{AIExplanation}}</div>"
+        let wordBack = "{{FrontSide}}<hr><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>" + aiBack
         switch type {
         case .questionAnswer:
             return (wordFront, wordBack)
         case .cloze:
-            return ("<div class=\"sentence\">{{cloze:Sentence}} {{SentenceAudio}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
+            return ("<div class=\"sentence\">{{cloze:Sentence}} {{SentenceAudio}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>" + aiBack)
         case .typeCloze:
-            return ("<div class=\"sentence\">{{type:cloze:Sentence}} {{SentenceAudio}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>")
+            return ("<div class=\"sentence\">{{type:cloze:Sentence}} {{SentenceAudio}}</div>", "{{FrontSide}}<div class=\"word\">{{Word}}</div><div class=\"label\">句子释义</div><div class=\"sentence-translation\">{{SentenceTranslation}}</div><div class=\"label\">上下文中的释义</div><div class=\"context-meaning\">{{ContextMeaning}}</div>" + aiBack)
         }
     }
     private func officialModelName(for type: AnkiTemplateType) -> String {
         switch type {
         // 与旧的 11 字段模型使用不同 ID，避免 Anki 将新四字段笔记误判为旧模型。
-        case .questionAnswer: return "Podcast Context Audio Word QA_2026-07-15"
-        case .cloze: return "Podcast Context Audio Word Cloze_2026-07-15"
-        case .typeCloze: return "Podcast Context Audio Word Type Cloze_2026-07-15"
+        case .questionAnswer: return "Podcast Context AI Audio Word QA_2026-07-17"
+        case .cloze: return "Podcast Context AI Audio Word Cloze_2026-07-17"
+        case .typeCloze: return "Podcast Context AI Audio Word Type Cloze_2026-07-17"
         }
     }
     private func clozeSentence(for item: VocabularyItem, type: AnkiTemplateType) -> String {

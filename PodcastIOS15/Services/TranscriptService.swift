@@ -16,7 +16,10 @@ struct TranscriptService {
             try validate(response)
             return try Self.parse(data: data, type: episode.transcriptType ?? url.pathExtension)
         }
-        return try await ApplePodcastTranscriptService().load(for: episode)
+        // Apple AMP rejects ordinary clients without private verification.
+        // Treat episodes without an RSS transcript as having no transcript so the
+        // player can present the manual transcription choices without an alert.
+        throw TranscriptError.empty
     }
 
     static func parse(data: Data, type: String) throws -> [TranscriptSegment] {

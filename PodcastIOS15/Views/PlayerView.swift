@@ -120,7 +120,7 @@ private struct PlayerContentView: View {
                                 Button {
                                     followPlayback = true
                                     if let index = currentIndex, segments.indices.contains(index) {
-                                        withAnimation { proxy.scrollTo(segments[index].id, anchor: .center) }
+                                        withAnimation { proxy.scrollTo(segments[index].id, anchor: UnitPoint(x: 0.5, y: 0.34)) }
                                     }
                                 } label: {
                                     Label("回到当前播放", systemImage: "location.fill")
@@ -142,7 +142,7 @@ private struct PlayerContentView: View {
                                 translate(index)
                             }
                             guard followPlayback, let index, segments.indices.contains(index) else { return }
-                            withAnimation { proxy.scrollTo(segments[index].id, anchor: .center) }
+                            withAnimation { proxy.scrollTo(segments[index].id, anchor: UnitPoint(x: 0.5, y: 0.34)) }
                         }
                     }
                 }
@@ -547,7 +547,7 @@ private struct AIAnalysisView: View {
                         Label(errorText, systemImage: "exclamationmark.triangle")
                             .foregroundColor(.orange)
                     } else {
-                        Text(result).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        MarkdownText(result)
                     }
                 }.padding(18)
             }
@@ -673,6 +673,7 @@ private struct WordLearningView: View {
     @State private var phonetic = ""
     @State private var definition = ""
     @State private var translation = ""
+    @State private var aiExplanation = ""
     @State private var sentenceTranslation = ""
     @State private var contextMeaningSource = ""
     @State private var frequency: WordFrequency?
@@ -699,6 +700,7 @@ private struct WordLearningView: View {
                         phonetic = ""
                         definition = ""
                         translation = ""
+                        aiExplanation = ""
                         contextMeaningSource = ""
                         frequency = nil
                     }
@@ -730,7 +732,12 @@ private struct WordLearningView: View {
                     if !translation.isEmpty {
                         resultCard(title: contextMeaningSource.isEmpty ? "在这里的意思" : contextMeaningSource,
                                    systemImage: "sparkles", color: AppTheme.purple) {
-                            Text(translation).font(.title3.weight(.semibold)).foregroundColor(AppTheme.purple)
+                            MarkdownText(translation, color: AppTheme.purple)
+                        }
+                    }
+                    if !aiExplanation.isEmpty {
+                        resultCard(title: "AI 解释", systemImage: "sparkles", color: AppTheme.purple) {
+                            MarkdownText(aiExplanation)
                         }
                     }
                     if !phonetic.isEmpty || frequency != nil {
@@ -850,8 +857,7 @@ private struct WordLearningView: View {
                                                                   baseURL: store.contextGPTBaseURL,
                                                                   apiKey: store.contextGPTAPIKey,
                                                                   model: store.contextGPTModel))
-                for try await partial in stream { translation = partial }
-                contextMeaningSource = "AI 解释"
+                for try await partial in stream { aiExplanation = partial }
             } catch { errorText = "AI 解释失败：\(error.localizedDescription)" }
             aiExplaining = false
         }
@@ -897,7 +903,7 @@ private struct WordLearningView: View {
             do {
                 let itemID = UUID()
                 let clip = try await AudioClipStore.create(from: sourceURL, itemID: itemID, start: request.segment.start, end: request.segment.end)
-                store.addVocabulary(VocabularyItem(id: itemID, word: selected, phonetic: savedPhonetic, definition: savedDefinition, translation: savedMeaning, sentence: request.segment.text, sentenceTranslation: savedSentenceTranslation, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: request.segment.start, audioClipFilename: clip, frequencyRank: savedFrequency?.rank))
+                store.addVocabulary(VocabularyItem(id: itemID, word: selected, phonetic: savedPhonetic, definition: savedDefinition, translation: savedMeaning, aiExplanation: aiExplanation.isEmpty ? nil : aiExplanation, sentence: request.segment.text, sentenceTranslation: savedSentenceTranslation, podcastTitle: episode.podcastTitle, episodeTitle: episode.title, timestamp: request.segment.start, audioClipFilename: clip, frequencyRank: savedFrequency?.rank))
                 loading = false
                 dismiss()
             } catch {
@@ -914,6 +920,30 @@ private struct WordLearningView: View {
 
     private func openEudic() {
         EudicService.open(word)
+    }
+}
+
+private struct MarkdownText: View {
+    let source: String
+    var color: Color = .primary
+
+    init(_ source: String, color: Color = .primary) {
+        self.source = source
+        self.color = color
+    }
+
+    var body: some View {
+        Text(attributed)
+            .foregroundColor(color)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var attributed: AttributedString {
+        (try? AttributedString(markdown: source,
+                               options: .init(interpretedSyntax: .full,
+                                              failurePolicy: .returnPartiallyParsedIfPossible)))
+            ?? AttributedString(source)
     }
 }
 

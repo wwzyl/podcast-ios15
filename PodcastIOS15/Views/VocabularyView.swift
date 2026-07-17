@@ -55,7 +55,7 @@ struct VocabularyView: View {
                         }.pickerStyle(.inline)
                     }
                     Section {
-                        Text("卡片包含：生词、所在句子、句子原声、句子释义、该词在上下文中的释义。不会导出系统词典释义或播客来源。")
+                        Text("卡片包含：生词、所在句子、句子原声、句子释义、上下文释义和已保存的 AI 解释。不会导出播客来源。")
                             .font(.caption).foregroundColor(.secondary)
                         Text("同一牌组再次导入时使用稳定的卡片标识；Anki 会保留已有卡片的学习进度，并加入新的生词卡。")
                             .font(.caption).foregroundColor(.secondary)
@@ -151,6 +151,12 @@ private struct VocabularyDetailView: View {
                 if !item.translation.isEmpty { Text(item.translation).font(.title3).foregroundColor(AppTheme.purple) }
                 if let rank = item.frequencyRank { Label("COCA 词频排名 #\(rank)", systemImage: "chart.bar.fill").foregroundColor(.secondary) }
                 if !item.definition.isEmpty { Text(item.definition) }
+                if let explanation = item.aiExplanation, !explanation.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("AI 解释").font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                        Text((try? AttributedString(markdown: explanation)) ?? AttributedString(explanation))
+                    }
+                }
                 if item.word != "★ 收藏句子" { Button("打开系统词典") { showDictionary = true } }
             }
             Section("原句") {

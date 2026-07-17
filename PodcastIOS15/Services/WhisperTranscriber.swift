@@ -104,6 +104,8 @@ actor WhisperTranscriber {
             continuation.yield(TranscriptionBatch(segments: [], progress: progress * 0.05,
                                                   statusText: "正在下载 \(quality.title) 模型 \(Int(progress * 100))%"))
         }
+        continuation.yield(TranscriptionBatch(segments: [], progress: 0.05,
+                                              statusText: "正在初始化 \(quality.title) 模型"))
         if contextModelPath != model.path {
             if let context { whisper_free(context) }
             context = nil
@@ -112,10 +114,16 @@ actor WhisperTranscriber {
         if context == nil {
             context = makeContext(model: model, useGPU: true)
             contextUsesGPU = context != nil
-            if context == nil { context = makeContext(model: model, useGPU: false); contextUsesGPU = false }
+            if context == nil {
+                let fallbackModel = try cpuFallbackModel(for: model)
+                context = makeContext(model: fallbackModel, useGPU: false)
+                contextUsesGPU = false
+            }
             if context != nil { contextModelPath = model.path }
         }
         guard context != nil else { throw WhisperTranscriptionError.modelInitializationFailed }
+        continuation.yield(TranscriptionBatch(segments: [], progress: 0.06,
+                                              statusText: "正在解码节目音频"))
         let asset = AVURLAsset(url: audioURL)
         guard let track = asset.tracks(withMediaType: .audio).first else { throw WhisperTranscriptionError.audioDecodeFailed }
         let duration = asset.duration.seconds
@@ -154,12 +162,20 @@ actor WhisperTranscriber {
         guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
 
         let mappedPCM = try pcmBuffer.mappedData()
-        let speechRanges = (try? vad.speechRanges(in: mappedPCM, sampleCount: pcmBuffer.sampleCount,
-                                                  sampleRate: samplesPerSecond,
-                                                  maximumDuration: preferences.maximumSegmentDuration))
-            ?? [0..<pcmBuffer.sampleCount]
-        guard !speechRanges.isEmpty else { throw WhisperTranscriptionError.transcriptionFailed }
-        for range in speechRanges {
+        continuation.yield(TranscriptionBatch(segments: [], progress: 0.08,
+                                              statusText: "正在分析语音和静音片段"))
+        let vadRanges = try? vad.speechRanges(in: mappedPCM, sampleCount: pcmBuffer.sampleCount,
+                                              sampleRate: samplesPerSecond,
+                                              maximumDuration: preferences.maximumSegmentDuration)
+        let speechRanges = (vadRanges?.isEmpty == false)
+            ? vadRanges!
+            : boundedFallbackRanges(sampleCount: pcmBuffer.sampleCount,
+                                    sampleRate: samplesPerSecond,
+                                    maximumDuration: preferences.maximumSegmentDuration)
+        guard !speechRanges.isEmpty else { throw WhisperTranscriptionError.audioDecodeFailed }
+        continuation.yield(TranscriptionBatch(segments: [], progress: 0.1,
+                                              statusText: "正在转录第 1 个语音片段，共 \(speechRanges.count) 个"))
+        for (rangeIndex, range) in speechRanges.enumerated() {
             try Task.checkCancellation()
             let chunk = mappedPCM.floatSamples(in: range)
             let baseTime = resumeTime + Double(range.lowerBound) / Double(samplesPerSecond)
@@ -170,7 +186,9 @@ actor WhisperTranscriber {
                 try? TranscriptCache.save(allSegments, episodeID: episode.id)
             }
             let processedTime = resumeTime + Double(range.upperBound) / Double(samplesPerSecond)
-            continuation.yield(TranscriptionBatch(segments: sentences, progress: progress(at: processedTime, duration: duration)))
+            continuation.yield(TranscriptionBatch(segments: sentences,
+                                                  progress: progress(at: processedTime, duration: duration),
+                                                  statusText: "正在转录第 \(rangeIndex + 1) 个语音片段，共 \(speechRanges.count) 个"))
         }
         if let finalSentence = assembler.finish() {
             allSegments.append(finalSentence)
@@ -197,7 +215,8 @@ actor WhisperTranscriber {
         var status = runWhisper(samples, context: activeContext, language: language)
         if status != 0, contextUsesGPU {
             whisper_free(activeContext)
-            context = makeContext(model: model, useGPU: false)
+            let fallbackModel = try cpuFallbackModel(for: model)
+            context = makeContext(model: fallbackModel, useGPU: false)
             contextUsesGPU = false
             guard let cpuContext = context else { throw WhisperTranscriptionError.modelInitializationFailed }
             activeContext = cpuContext
@@ -215,6 +234,21 @@ actor WhisperTranscriber {
         return result
     }
 
+    private func cpuFallbackModel(for model: URL) throws -> URL {
+        let folder = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true)
+            .appendingPathComponent("WhisperCPUFallback", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let destination = folder.appendingPathComponent(model.lastPathComponent)
+        let sourceSize = (try? model.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let destinationSize = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+        if sourceSize != destinationSize {
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.copyItem(at: model, to: destination)
+        }
+        return destination
+    }
+
     private func runWhisper(_ samples: [Float], context: OpaquePointer, language: String) -> Int32 {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         params.print_realtime = false; params.print_progress = false; params.print_timestamps = false; params.print_special = false
@@ -230,6 +264,15 @@ actor WhisperTranscriber {
 
     private func progress(at time: TimeInterval, duration: TimeInterval) -> Double {
         duration.isFinite && duration > 0 ? min(1, time / duration) : 0
+    }
+
+    private func boundedFallbackRanges(sampleCount: Int, sampleRate: Int,
+                                       maximumDuration: TimeInterval) -> [Range<Int>] {
+        guard sampleCount > 0 else { return [] }
+        let chunkSize = max(sampleRate * 10, Int(maximumDuration * Double(sampleRate)))
+        return stride(from: 0, to: sampleCount, by: chunkSize).map { start in
+            start..<min(sampleCount, start + chunkSize)
+        }
     }
 
     private func samples(from sampleBuffer: CMSampleBuffer) -> [Float] {
@@ -474,7 +517,6 @@ private struct WhisperModelStore {
     func modelURL(for quality: WhisperQuality, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         let name = (quality.filename as NSString).deletingPathExtension
         if let bundled = Bundle.main.url(forResource: name, withExtension: "bin") {
-            progress(1)
             return bundled
         }
         let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -518,10 +560,15 @@ private struct WhisperModelStore {
         let archiveSize = (try? archive.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         guard archiveSize > 1_000_000 else { throw WhisperTranscriptionError.modelDownloadFailed }
         defer { try? FileManager.default.removeItem(at: archive) }
-        let extracted = folder.appendingPathComponent((archiveFilename as NSString).deletingPathExtension, isDirectory: true)
-        try? FileManager.default.removeItem(at: extracted)
+        let namedExtraction = folder.appendingPathComponent((archiveFilename as NSString).deletingPathExtension, isDirectory: true)
+        let genericExtraction = folder.appendingPathComponent("mlmodelc", isDirectory: true)
+        try? FileManager.default.removeItem(at: namedExtraction)
+        try? FileManager.default.removeItem(at: genericExtraction)
         try FileManager.default.unzipItem(at: archive, to: folder)
-        guard FileManager.default.fileExists(atPath: extracted.path) else { throw WhisperTranscriptionError.modelDownloadFailed }
+        let extracted: URL
+        if FileManager.default.fileExists(atPath: namedExtraction.path) { extracted = namedExtraction }
+        else if FileManager.default.fileExists(atPath: genericExtraction.path) { extracted = genericExtraction }
+        else { throw WhisperTranscriptionError.modelDownloadFailed }
         try? FileManager.default.removeItem(at: destination)
         if extracted != destination { try FileManager.default.moveItem(at: extracted, to: destination) }
         guard FileManager.default.fileExists(atPath: weights.path) else { throw WhisperTranscriptionError.modelDownloadFailed }

@@ -162,7 +162,7 @@ private struct ContextDefinitionSettingsView: View {
             Section {
                 Toggle("使用 GPT 上下文释义", isOn: $store.contextGPTEnabled)
             } footer: {
-                Text("官方 6.3.5 也包含 GPT 开关、API Key、Base URL 和模型设置。未启用时使用官方词典释义与微软翻译做本地语境匹配。")
+                Text("未填写 API Key 时，AI 分析、AI 解释、上下文释义和 GPT 翻译会默认使用内置接口；填写自己的 OpenAI 兼容接口后优先使用你的配置。")
             }
             Section("OpenAI 兼容接口") {
                 TextField("Base URL", text: $store.contextGPTBaseURL)

@@ -98,19 +98,21 @@ actor TranslationService {
     }
 
     private func translateWithGPT(_ text: String, to language: String, configuration: TranslationConfiguration) async throws -> String {
-        guard !configuration.gptAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw TranslationServiceError.missingCredential("GPT")
-        }
-        let base = configuration.gptBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let resolvedConfiguration = try await BuiltInAIConfigurationProvider.shared.resolvedConfiguration(
+            from: ContextDefinitionConfiguration(enabled: true,
+                                                 baseURL: configuration.gptBaseURL,
+                                                 apiKey: configuration.gptAPIKey,
+                                                 model: configuration.gptModel))
+        let base = resolvedConfiguration.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let endpoint = base.hasSuffix("chat/completions") ? base : (base.hasSuffix("/v1") ? base + "/chat/completions" : base + "/v1/chat/completions")
         guard let url = URL(string: endpoint) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(configuration.gptAPIKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(resolvedConfiguration.apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": configuration.gptModel,
+            "model": resolvedConfiguration.model,
             "temperature": 0.1,
             "messages": [
                 ["role": "system", "content": "Translate the podcast transcript naturally and accurately into language code \(language). Preserve meaning, tone, names, and paragraph structure. Return only the translation."],

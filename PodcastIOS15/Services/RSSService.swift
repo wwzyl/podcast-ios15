@@ -20,6 +20,7 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         var duration = ""
         var audio = ""
         var artwork = ""
+        var link = ""
         var transcript = ""
         var transcriptType = ""
     }
@@ -61,7 +62,8 @@ private final class RSSParser: NSObject, XMLParserDelegate {
                 audioURL: audio,
                 artworkURL: makeURL(item.artwork) ?? artwork,
                 transcriptURL: makeURL(item.transcript),
-                transcriptType: item.transcriptType.isEmpty ? nil : item.transcriptType
+                transcriptType: item.transcriptType.isEmpty ? nil : item.transcriptType,
+                appleEpisodeID: Self.appleEpisodeID(from: item.link)
             )
         }.sorted { ($0.publishedAt ?? .distantPast) > ($1.publishedAt ?? .distantPast) }
         return Podcast(title: channelTitle.plainText.fallback(feedURL.host ?? "Podcast"), author: channelAuthor.plainText, summary: channelSummary.plainText, artworkURL: artwork, feedURL: feedURL, episodes: episodes)
@@ -94,7 +96,8 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         if insideItem && key == "link" && attributeDict["rel"] == "enclosure" {
             currentItem.audio = attributeDict["href"] ?? currentItem.audio
         }
-        if key == "podcast:transcript" && insideItem {
+        let localName = key.split(separator: ":").last.map(String.init) ?? key
+        if insideItem && localName == "transcript" && (key == "podcast:transcript" || namespaceURI?.contains("podcastindex.org") == true) {
             currentItem.transcript = attributeDict["url"] ?? ""
             currentItem.transcriptType = attributeDict["type"] ?? ""
         }
@@ -122,7 +125,9 @@ private final class RSSParser: NSObject, XMLParserDelegate {
             case "description", "content:encoded", "summary": if currentItem.summary.isEmpty { currentItem.summary = text }
             case "pubdate", "published", "updated": if currentItem.published.isEmpty { currentItem.published = text }
             case "itunes:duration": currentItem.duration = text
-            case "link": if currentItem.audio.isEmpty && text.hasPrefix("http") { currentItem.audio = text }
+            case "link":
+                if text.hasPrefix("http") { currentItem.link = text }
+                if currentItem.audio.isEmpty && text.hasPrefix("http") { currentItem.audio = text }
             case "item", "entry": items.append(currentItem); insideItem = false
             default: break
             }
@@ -160,6 +165,12 @@ private final class RSSParser: NSObject, XMLParserDelegate {
         let parts = value.split(separator: ":").compactMap { Double($0) }
         guard !parts.isEmpty else { return nil }
         return parts.reversed().enumerated().reduce(0) { $0 + $1.element * pow(60, Double($1.offset)) }
+    }
+
+    private static func appleEpisodeID(from value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              components.host?.contains("podcasts.apple.com") == true else { return nil }
+        return components.queryItems?.first { $0.name == "i" }?.value
     }
 }
 

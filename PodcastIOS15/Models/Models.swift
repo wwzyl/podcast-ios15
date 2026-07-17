@@ -8,6 +8,7 @@ struct Podcast: Identifiable, Codable, Hashable {
     var artworkURL: URL?
     let feedURL: URL
     var episodes: [Episode]
+    var appleCollectionID: Int? = nil
 }
 
 struct Episode: Identifiable, Codable, Hashable {
@@ -21,6 +22,8 @@ struct Episode: Identifiable, Codable, Hashable {
     let artworkURL: URL?
     let transcriptURL: URL?
     let transcriptType: String?
+    var applePodcastID: Int? = nil
+    var appleEpisodeID: String? = nil
 }
 
 struct TranscriptSegment: Identifiable, Codable, Hashable {

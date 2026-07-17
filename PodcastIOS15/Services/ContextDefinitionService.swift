@@ -6,6 +6,18 @@ struct ContextDefinitionConfiguration {
     let apiKey: String
     let model: String
     var style: AIExplanationStyle = .detailed
+
+    var hasUserAPI: Bool {
+        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var shouldUseAIProvider: Bool {
+        enabled || !hasUserAPI
+    }
+
+    func withStyle(_ style: AIExplanationStyle) -> ContextDefinitionConfiguration {
+        ContextDefinitionConfiguration(enabled: enabled, baseURL: baseURL, apiKey: apiKey, model: model, style: style)
+    }
 }
 
 enum ContextDefinitionError: LocalizedError {
@@ -28,10 +40,7 @@ struct ContextDefinitionService {
                  dictionary: DictionaryResult?,
                  targetLanguage: String,
                  configuration: ContextDefinitionConfiguration) async throws -> String {
-        if configuration.enabled {
-            guard !configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw ContextDefinitionError.missingAPIKey
-            }
+        if configuration.shouldUseAIProvider {
             return try await gptMeaningWithRetry(of: selection, previous: previous, sentence: sentence,
                                                  next: next, targetLanguage: targetLanguage,
                                                  configuration: configuration)
@@ -77,7 +86,8 @@ struct ContextDefinitionService {
                             next: String?,
                             targetLanguage: String,
                             configuration: ContextDefinitionConfiguration) async throws -> String {
-        let endpoint = try chatEndpoint(configuration.baseURL)
+        let resolvedConfiguration = try await BuiltInAIConfigurationProvider.shared.resolvedConfiguration(from: configuration)
+        let endpoint = try chatEndpoint(resolvedConfiguration.baseURL)
         let context = [previous.map { "上一句：\($0)" }, "当前句：\(sentence)", next.map { "下一句：\($0)" }]
             .compactMap { $0 }.joined(separator: "\n")
         let styleInstruction: String
@@ -89,7 +99,7 @@ struct ContextDefinitionService {
         let system = "你是播客语言学习词典。只解释用户选中的单词或词组在给定上下文中的具体含义，不要翻译整段。\(styleInstruction) 输出语言代码：\(targetLanguage)。"
         let user = "选中内容：\(selection)\n\(context)"
         let body: [String: Any] = [
-            "model": configuration.model,
+            "model": resolvedConfiguration.model,
             "temperature": 0.1,
             "messages": [
                 ["role": "system", "content": system],
@@ -100,7 +110,7 @@ struct ContextDefinitionService {
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(resolvedConfiguration.apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {

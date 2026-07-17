@@ -16,9 +16,11 @@ struct TranscriptService {
             try validate(response)
             return try Self.parse(data: data, type: episode.transcriptType ?? url.pathExtension)
         }
-        // Apple AMP rejects ordinary clients without private verification.
-        // Treat episodes without an RSS transcript as having no transcript so the
-        // player can present the manual transcription choices without an alert.
+        if let segments = try? await ApplePodcastTranscriptService().load(for: episode), !segments.isEmpty {
+            return segments
+        }
+        // Treat episodes without a reachable RSS or Apple transcript as empty so
+        // the player can present the manual transcription choices without an alert.
         throw TranscriptError.empty
     }
 
@@ -59,12 +61,15 @@ struct TranscriptService {
         let array: [[String: Any]]
         if let direct = object as? [[String: Any]] { array = direct }
         else if let dict = object as? [String: Any], let segments = dict["segments"] as? [[String: Any]] { array = segments }
+        else if let dict = object as? [String: Any], let transcript = dict["transcript"] as? [[String: Any]] { array = transcript }
+        else if let dict = object as? [String: Any], let items = dict["items"] as? [[String: Any]] { array = items }
+        else if let dict = object as? [String: Any], let captions = dict["captions"] as? [[String: Any]] { array = captions }
         else { throw TranscriptError.unsupported }
         let result = array.compactMap { item -> TranscriptSegment? in
-            let text = (item["text"] as? String ?? item["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = (item["text"] as? String ?? item["body"] as? String ?? item["content"] as? String ?? item["caption"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
-            let start = number(item["startTime"] ?? item["start"] ?? item["offset"]) ?? 0
-            let end = number(item["endTime"] ?? item["end"])
+            let start = number(item["startTime"] ?? item["start"] ?? item["offset"] ?? item["from"]) ?? 0
+            let end = number(item["endTime"] ?? item["end"] ?? item["to"])
             return TranscriptSegment(start: start, end: end, text: text)
         }
         guard !result.isEmpty else { throw TranscriptError.empty }

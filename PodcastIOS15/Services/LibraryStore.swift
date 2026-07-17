@@ -53,7 +53,7 @@ final class LibraryStore: ObservableObject {
 
     init() {
         targetLanguage = UserDefaults.standard.string(forKey: "targetLanguage") ?? "zh-Hans"
-        contextGPTEnabled = UserDefaults.standard.bool(forKey: "contextGPTEnabled")
+        contextGPTEnabled = UserDefaults.standard.object(forKey: "contextGPTEnabled") as? Bool ?? true
         contextGPTBaseURL = UserDefaults.standard.string(forKey: "contextGPTBaseURL") ?? "https://api.openai.com/v1"
         contextGPTAPIKey = UserDefaults.standard.string(forKey: "contextGPTAPIKey") ?? ""
         contextGPTModel = UserDefaults.standard.string(forKey: "contextGPTModel") ?? "gpt-4o-mini"
@@ -96,8 +96,15 @@ final class LibraryStore: ObservableObject {
         AIExplanationStyle(rawValue: aiExplanationStyle) ?? .detailed
     }
 
-    func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil) async throws {
+    func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil, appleCollectionID: Int? = nil) async throws {
         var podcast = try await RSSService().load(feedURL: feedURL)
+        let resolvedAppleCollectionID = appleCollectionID ?? await PodcastSearchService().collectionID(feedURL: feedURL, title: podcast.title)
+        podcast.appleCollectionID = resolvedAppleCollectionID
+        podcast.episodes = podcast.episodes.map { episode in
+            var value = episode
+            value.applePodcastID = resolvedAppleCollectionID
+            return value
+        }
         // Apple 搜索结果的封面通常比 RSS 中的旧 HTTP 地址更稳定。
         podcast.artworkURL = fallbackArtworkURL ?? podcast.artworkURL ?? podcast.episodes.compactMap(\.artworkURL).first
         if let index = podcasts.firstIndex(where: { $0.feedURL == feedURL }) {
@@ -146,7 +153,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func refresh(_ podcast: Podcast) async throws {
-        try await subscribe(feedURL: podcast.feedURL, fallbackArtworkURL: podcast.artworkURL)
+        try await subscribe(feedURL: podcast.feedURL, fallbackArtworkURL: podcast.artworkURL, appleCollectionID: podcast.appleCollectionID)
     }
 
     func remove(_ podcast: Podcast) {

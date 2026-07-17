@@ -40,6 +40,18 @@ struct PodcastSearchService {
         return URL(string: value)
     }
 
+    func collectionID(feedURL: URL, title: String) async -> Int? {
+        var candidates = (try? await search(title, country: "CN")) ?? []
+        candidates.append(contentsOf: (try? await search(title, country: "US")) ?? [])
+        let normalizedFeed = feedURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        let match = candidates.first {
+            $0.feedUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() == normalizedFeed
+        } ?? candidates.first {
+            $0.collectionName.compare(title, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+        return match?.collectionId
+    }
+
     func popular(limitPerCountry: Int = 15) async throws -> [PodcastSearchResult] {
         async let china = popular(country: "cn", limit: limitPerCountry)
         async let unitedStates = popular(country: "us", limit: limitPerCountry)

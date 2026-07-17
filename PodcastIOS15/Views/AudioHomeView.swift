@@ -73,7 +73,7 @@ private struct AddPodcastView: View {
                 }
                 Section(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "中美热门播客" : "搜索结果") {
                     ForEach(results) { item in
-                        Button { subscribe(item.feedUrl, artworkURL: URL(string: item.artworkUrl600 ?? "")) } label: {
+                        Button { subscribe(item.feedUrl, artworkURL: URL(string: item.artworkUrl600 ?? ""), appleCollectionID: item.collectionId) } label: {
                             HStack(spacing: 12) {
                                 CachedArtworkImage(url: URL(string: item.artworkUrl600 ?? ""))
                                     .frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 9))
@@ -110,11 +110,11 @@ private struct AddPodcastView: View {
             loading = false
         }
     }
-    private func subscribe(_ value: String, artworkURL: URL? = nil) {
+    private func subscribe(_ value: String, artworkURL: URL? = nil, appleCollectionID: Int? = nil) {
         guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
         loading = true
         Task {
-            do { try await store.subscribe(feedURL: url, fallbackArtworkURL: artworkURL); dismiss() }
+            do { try await store.subscribe(feedURL: url, fallbackArtworkURL: artworkURL, appleCollectionID: appleCollectionID); dismiss() }
             catch { errorText = error.localizedDescription }
             loading = false
         }

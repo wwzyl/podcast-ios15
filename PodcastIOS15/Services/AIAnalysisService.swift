@@ -68,9 +68,9 @@ struct AIAnalysisService {
                 var lastError: Error = URLError(.unknown)
                 for attempt in 0..<3 {
                     do {
-                        let request = try makeRequest(kind: kind, previous: previous, sentence: sentence, next: next,
-                                                      outputLanguage: outputLanguage, style: style,
-                                                      configuration: configuration, stream: true)
+                        let request = try await makeRequest(kind: kind, previous: previous, sentence: sentence, next: next,
+                                                            outputLanguage: outputLanguage, style: style,
+                                                            configuration: configuration, stream: true)
                         try await perform(request: request, continuation: continuation)
                         continuation.finish()
                         return
@@ -142,11 +142,9 @@ struct AIAnalysisService {
                              outputLanguage: String,
                              style: AIExplanationStyle,
                              configuration: ContextDefinitionConfiguration,
-                             stream: Bool) throws -> URLRequest {
-        guard !configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw ContextDefinitionError.missingAPIKey
-        }
-        let endpoint = try chatEndpoint(configuration.baseURL)
+                             stream: Bool) async throws -> URLRequest {
+        let resolvedConfiguration = try await BuiltInAIConfigurationProvider.shared.resolvedConfiguration(from: configuration)
+        let endpoint = try chatEndpoint(resolvedConfiguration.baseURL)
         let context = [previous.map { "Previous: \($0)" }, "Current: \(sentence)", next.map { "Next: \($0)" }]
             .compactMap { $0 }.joined(separator: "\n")
         let task: String
@@ -172,7 +170,7 @@ struct AIAnalysisService {
         case .grammar: styleInstruction = "Prioritize grammar, syntax, word function, collocations, and reusable sentence patterns."
         }
         let body: [String: Any] = [
-            "model": configuration.model,
+            "model": resolvedConfiguration.model,
             "temperature": 0.15,
             "stream": stream,
             "messages": [
@@ -184,7 +182,7 @@ struct AIAnalysisService {
         request.httpMethod = "POST"
         request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(resolvedConfiguration.apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }

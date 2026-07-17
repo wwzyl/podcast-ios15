@@ -808,7 +808,7 @@ private struct WordLearningView: View {
             let resolvedSentenceTranslation = sentenceTranslation.isEmpty
                 ? ((try? await TranslationService.shared.translate(request.segment.text, to: store.targetLanguage, configuration: store.translationConfiguration)) ?? "")
                 : sentenceTranslation
-            let configuration = ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
+            let configuration = ContextDefinitionConfiguration(enabled: true,
                                                                baseURL: store.contextGPTBaseURL,
                                                                apiKey: store.contextGPTAPIKey,
                                                                model: store.contextGPTModel,
@@ -823,7 +823,7 @@ private struct WordLearningView: View {
                     dictionary: result,
                     targetLanguage: store.targetLanguage,
                     configuration: configuration)
-                contextMeaningSource = configuration.enabled ? "GPT 上下文释义" : "上下文释义"
+                contextMeaningSource = configuration.shouldUseAIProvider ? "GPT 上下文释义" : "上下文释义"
             } catch {
                 errorText = error.localizedDescription
             }
@@ -888,8 +888,8 @@ private struct WordLearningView: View {
                         next: request.next,
                         dictionary: dictionary,
                         targetLanguage: store.targetLanguage,
-                        configuration: ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
-                                                                      baseURL: store.contextGPTBaseURL,
+                        configuration: ContextDefinitionConfiguration(enabled: true,
+                                                                       baseURL: store.contextGPTBaseURL,
                                                                       apiKey: store.contextGPTAPIKey,
                                                                       model: store.contextGPTModel,
                                                                       style: store.resolvedAIExplanationStyle))) ?? ""

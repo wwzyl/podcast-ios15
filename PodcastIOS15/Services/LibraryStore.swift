@@ -18,6 +18,25 @@ final class LibraryStore: ObservableObject {
     @Published var translationProvider = TranslationProvider.microsoft.rawValue { didSet { UserDefaults.standard.set(translationProvider, forKey: "translationProvider") } }
     @Published var translationFallbackEnabled = true { didSet { UserDefaults.standard.set(translationFallbackEnabled, forKey: "translationFallbackEnabled") } }
     @Published var deeplAPIKey = "" { didSet { UserDefaults.standard.set(deeplAPIKey, forKey: "deeplAPIKey") } }
+    @Published var aiOutputLanguage = "zh-Hans" { didSet { UserDefaults.standard.set(aiOutputLanguage, forKey: "aiOutputLanguage") } }
+    @Published var aiExplanationStyle = AIExplanationStyle.detailed.rawValue { didSet { UserDefaults.standard.set(aiExplanationStyle, forKey: "aiExplanationStyle") } }
+    @Published var transcriptionSplitOnComma = false { didSet { UserDefaults.standard.set(transcriptionSplitOnComma, forKey: "transcriptionSplitOnComma") } }
+    @Published var transcriptionWordTimestamps = true { didSet { UserDefaults.standard.set(transcriptionWordTimestamps, forKey: "transcriptionWordTimestamps") } }
+    @Published var transcriptionMinimumSegmentDuration = 1.0 { didSet { UserDefaults.standard.set(transcriptionMinimumSegmentDuration, forKey: "transcriptionMinimumSegmentDuration") } }
+    @Published var transcriptionMaximumSegmentDuration = 28.0 { didSet { UserDefaults.standard.set(transcriptionMaximumSegmentDuration, forKey: "transcriptionMaximumSegmentDuration") } }
+    @Published var transcriptionChineseSegmentCount = 28 { didSet { UserDefaults.standard.set(transcriptionChineseSegmentCount, forKey: "transcriptionChineseSegmentCount") } }
+    @Published var transcriptionTranslateToEnglish = false { didSet { UserDefaults.standard.set(transcriptionTranslateToEnglish, forKey: "transcriptionTranslateToEnglish") } }
+    @Published var transcriptionKeepScreenOn = true { didSet { UserDefaults.standard.set(transcriptionKeepScreenOn, forKey: "transcriptionKeepScreenOn") } }
+    @Published var transcriptionAutoDetectLanguage = true { didSet { UserDefaults.standard.set(transcriptionAutoDetectLanguage, forKey: "transcriptionAutoDetectLanguage") } }
+    @Published var transcriptionSourceLanguage = "en" { didSet { UserDefaults.standard.set(transcriptionSourceLanguage, forKey: "transcriptionSourceLanguage") } }
+    @Published var lookupPausePlayback = true { didSet { UserDefaults.standard.set(lookupPausePlayback, forKey: "lookupPausePlayback") } }
+    @Published var lookupResumePlayback = true { didSet { UserDefaults.standard.set(lookupResumePlayback, forKey: "lookupResumePlayback") } }
+    @Published var lookupAutoCopy = false { didSet { UserDefaults.standard.set(lookupAutoCopy, forKey: "lookupAutoCopy") } }
+    @Published var lookupOpenEudicDirectly = false { didSet { UserDefaults.standard.set(lookupOpenEudicDirectly, forKey: "lookupOpenEudicDirectly") } }
+    @Published var exportIncludeTimestamps = true { didSet { UserDefaults.standard.set(exportIncludeTimestamps, forKey: "exportIncludeTimestamps") } }
+    @Published var exportIncludeTranslations = true { didSet { UserDefaults.standard.set(exportIncludeTranslations, forKey: "exportIncludeTranslations") } }
+    @Published var lockScreenShowsTranscript = true { didSet { UserDefaults.standard.set(lockScreenShowsTranscript, forKey: "lockScreenShowsTranscript") } }
+    @Published var autoTranslateCurrentSentence = false { didSet { UserDefaults.standard.set(autoTranslateCurrentSentence, forKey: "autoTranslateCurrentSentence") } }
     private var repairingArtwork = false
 
     private let decoder: JSONDecoder = {
@@ -41,6 +60,25 @@ final class LibraryStore: ObservableObject {
         translationProvider = UserDefaults.standard.string(forKey: "translationProvider") ?? TranslationProvider.microsoft.rawValue
         translationFallbackEnabled = UserDefaults.standard.object(forKey: "translationFallbackEnabled") as? Bool ?? true
         deeplAPIKey = UserDefaults.standard.string(forKey: "deeplAPIKey") ?? ""
+        aiOutputLanguage = UserDefaults.standard.string(forKey: "aiOutputLanguage") ?? "zh-Hans"
+        aiExplanationStyle = UserDefaults.standard.string(forKey: "aiExplanationStyle") ?? AIExplanationStyle.detailed.rawValue
+        transcriptionSplitOnComma = UserDefaults.standard.bool(forKey: "transcriptionSplitOnComma")
+        transcriptionWordTimestamps = UserDefaults.standard.object(forKey: "transcriptionWordTimestamps") as? Bool ?? true
+        transcriptionMinimumSegmentDuration = UserDefaults.standard.object(forKey: "transcriptionMinimumSegmentDuration") as? Double ?? 1.0
+        transcriptionMaximumSegmentDuration = UserDefaults.standard.object(forKey: "transcriptionMaximumSegmentDuration") as? Double ?? 28.0
+        transcriptionChineseSegmentCount = UserDefaults.standard.object(forKey: "transcriptionChineseSegmentCount") as? Int ?? 28
+        transcriptionTranslateToEnglish = UserDefaults.standard.bool(forKey: "transcriptionTranslateToEnglish")
+        transcriptionKeepScreenOn = UserDefaults.standard.object(forKey: "transcriptionKeepScreenOn") as? Bool ?? true
+        transcriptionAutoDetectLanguage = UserDefaults.standard.object(forKey: "transcriptionAutoDetectLanguage") as? Bool ?? true
+        transcriptionSourceLanguage = UserDefaults.standard.string(forKey: "transcriptionSourceLanguage") ?? "en"
+        lookupPausePlayback = UserDefaults.standard.object(forKey: "lookupPausePlayback") as? Bool ?? true
+        lookupResumePlayback = UserDefaults.standard.object(forKey: "lookupResumePlayback") as? Bool ?? true
+        lookupAutoCopy = UserDefaults.standard.bool(forKey: "lookupAutoCopy")
+        lookupOpenEudicDirectly = UserDefaults.standard.bool(forKey: "lookupOpenEudicDirectly")
+        exportIncludeTimestamps = UserDefaults.standard.object(forKey: "exportIncludeTimestamps") as? Bool ?? true
+        exportIncludeTranslations = UserDefaults.standard.object(forKey: "exportIncludeTranslations") as? Bool ?? true
+        lockScreenShowsTranscript = UserDefaults.standard.object(forKey: "lockScreenShowsTranscript") as? Bool ?? true
+        autoTranslateCurrentSentence = UserDefaults.standard.bool(forKey: "autoTranslateCurrentSentence")
         podcasts = load([Podcast].self, name: "podcasts.json") ?? []
         vocabulary = load([VocabularyItem].self, name: "vocabulary.json") ?? []
     }
@@ -52,6 +90,10 @@ final class LibraryStore: ObservableObject {
                                  gptBaseURL: contextGPTBaseURL,
                                  gptAPIKey: contextGPTAPIKey,
                                  gptModel: contextGPTModel)
+    }
+
+    var resolvedAIExplanationStyle: AIExplanationStyle {
+        AIExplanationStyle(rawValue: aiExplanationStyle) ?? .detailed
     }
 
     func subscribe(feedURL: URL, fallbackArtworkURL: URL? = nil) async throws {

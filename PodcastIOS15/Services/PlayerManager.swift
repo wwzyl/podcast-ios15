@@ -16,6 +16,7 @@ final class PlayerManager: ObservableObject {
     private let player = AVPlayer()
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var nowPlayingSubtitle: String?
 
     init() {
         configureAudioSession()
@@ -42,6 +43,7 @@ final class PlayerManager: ObservableObject {
             currentTime = 0
             duration = episode.duration ?? 0
             playbackStatus = "正在准备播放…"
+            nowPlayingSubtitle = nil
             player.replaceCurrentItem(with: AVPlayerItem(url: sourceURL ?? episode.audioURL))
             let saved = UserDefaults.standard.double(forKey: progressKey(episode))
             if saved > 3 { seek(to: saved) }
@@ -72,6 +74,13 @@ final class PlayerManager: ObservableObject {
         updateNowPlaying()
     }
     func skip(_ delta: TimeInterval) { seek(to: currentTime + delta) }
+
+    func updateNowPlayingSubtitle(_ subtitle: String?) {
+        let value = subtitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value != nowPlayingSubtitle else { return }
+        nowPlayingSubtitle = value
+        updateNowPlaying()
+    }
 
     func setQueue(_ episodes: [Episode], current: Episode) {
         queue = episodes
@@ -151,13 +160,17 @@ final class PlayerManager: ObservableObject {
 
     private func updateNowPlaying() {
         guard let episode else { return }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: episode.title,
             MPMediaItemPropertyPodcastTitle: episode.podcastTitle,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: currentTime,
             MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? rate : 0
         ]
+        if let nowPlayingSubtitle, !nowPlayingSubtitle.isEmpty {
+            info[MPMediaItemPropertyAlbumTitle] = nowPlayingSubtitle
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
     private func handlePlaybackEnded() {

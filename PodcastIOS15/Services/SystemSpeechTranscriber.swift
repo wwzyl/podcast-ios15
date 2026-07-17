@@ -18,12 +18,13 @@ enum SystemSpeechError: LocalizedError {
 actor SystemSpeechTranscriber {
     static let shared = SystemSpeechTranscriber()
 
-    func transcribeStream(audioURL: URL, episode: Episode) -> AsyncThrowingStream<TranscriptionBatch, Error> {
+    func transcribeStream(audioURL: URL, episode: Episode, localeIdentifier: String?) -> AsyncThrowingStream<TranscriptionBatch, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     guard await Self.authorized() else { throw SystemSpeechError.denied }
-                    guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else { throw SystemSpeechError.unavailable }
+                    let recognizer = localeIdentifier.map { SFSpeechRecognizer(locale: Locale(identifier: $0)) } ?? SFSpeechRecognizer()
+                    guard let recognizer, recognizer.isAvailable else { throw SystemSpeechError.unavailable }
                     let request = SFSpeechURLRecognitionRequest(url: audioURL)
                     request.shouldReportPartialResults = true
                     if #available(iOS 13.0, *), recognizer.supportsOnDeviceRecognition {

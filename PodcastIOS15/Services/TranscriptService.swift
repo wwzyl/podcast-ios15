@@ -9,14 +9,14 @@ enum TranscriptError: LocalizedError {
 
 struct TranscriptService {
     func load(for episode: Episode) async throws -> [TranscriptSegment] {
-        guard let url = episode.transcriptURL else {
-            throw TranscriptError.empty
+        if let url = episode.transcriptURL {
+            var request = URLRequest(url: url)
+            request.setValue("PodcastIOS15/1.0", forHTTPHeaderField: "User-Agent")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response)
+            return try Self.parse(data: data, type: episode.transcriptType ?? url.pathExtension)
         }
-        var request = URLRequest(url: url)
-        request.setValue("PodcastIOS15/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response)
-        return try Self.parse(data: data, type: episode.transcriptType ?? url.pathExtension)
+        return try await ApplePodcastTranscriptService().load(for: episode)
     }
 
     static func parse(data: Data, type: String) throws -> [TranscriptSegment] {

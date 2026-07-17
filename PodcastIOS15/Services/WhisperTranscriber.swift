@@ -3,6 +3,7 @@ import AVFoundation
 import CoreMedia
 import CoreML
 import whisper
+import ZIPFoundation
 
 enum WhisperTranscriptionError: LocalizedError {
     case modelDownloadFailed, modelInitializationFailed, audioDownloadFailed, audioDecodeFailed, transcriptionFailed
@@ -33,17 +34,40 @@ enum WhisperQuality: String, CaseIterable {
     }
 
     var language: String { self == .fastEnglish || self == .balancedEnglish ? "en" : "auto" }
+    var title: String {
+        switch self {
+        case .fast: return "极速"
+        case .balanced: return "均衡"
+        case .fastEnglish: return "英语极速"
+        case .balancedEnglish: return "英语均衡"
+        }
+    }
+
+    var encoderArchiveFilename: String? {
+        switch self {
+        case .fast: return nil
+        case .balanced: return "ggml-small-encoder.mlmodelc.zip"
+        case .fastEnglish: return "ggml-base.en-encoder.mlmodelc.zip"
+        case .balancedEnglish: return "ggml-small.en-encoder.mlmodelc.zip"
+        }
+    }
+
+    var installedEncoderFilename: String {
+        ((filename as NSString).deletingPathExtension) + "-encoder.mlmodelc"
+    }
 }
 
 struct TranscriptionBatch {
     let segments: [TranscriptSegment]
     let progress: Double
     let replacesExisting: Bool
+    let statusText: String?
 
-    init(segments: [TranscriptSegment], progress: Double, replacesExisting: Bool = false) {
+    init(segments: [TranscriptSegment], progress: Double, replacesExisting: Bool = false, statusText: String? = nil) {
         self.segments = segments
         self.progress = progress
         self.replacesExisting = replacesExisting
+        self.statusText = statusText
     }
 }
 
@@ -71,7 +95,10 @@ actor WhisperTranscriber {
     }
 
     private func runTranscription(audioURL: URL, episode: Episode, language: String, quality: WhisperQuality, continuation: AsyncThrowingStream<TranscriptionBatch, Error>.Continuation) async throws {
-        let model = try await WhisperModelStore().modelURL(for: quality)
+        let model = try await WhisperModelStore().modelURL(for: quality) { progress in
+            continuation.yield(TranscriptionBatch(segments: [], progress: progress * 0.05,
+                                                  statusText: "正在下载 \(quality.title) 模型 \(Int(progress * 100))%"))
+        }
         if contextModelPath != model.path {
             if let context { whisper_free(context) }
             context = nil
@@ -110,56 +137,39 @@ actor WhisperTranscriber {
         guard reader.startReading() else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
 
         let samplesPerSecond = 16_000
-        let windowSize = samplesPerSecond * 20
-        let stepSize = samplesPerSecond * 15
-        var pending: [Float] = []
-        pending.reserveCapacity(windowSize + samplesPerSecond)
-        var processedSamples = 0
-        var acceptedThrough = resumeTime
-        var assembler = SentenceAssembler()
+        let pcmBuffer = try DiskPCMBuffer()
+        defer { pcmBuffer.remove() }
+        let preferences = TranscriptionPreferences.current
+        var assembler = SentenceAssembler(preferences: preferences)
 
         while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
             try Task.checkCancellation()
-            pending.append(contentsOf: samples(from: sampleBuffer))
-            while pending.count >= windowSize {
-                let chunk = Array(pending.prefix(windowSize))
-                let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
-                if !((try? vad.containsSpeech(in: chunk)) ?? true) {
-                    let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
-                    acceptedThrough = boundary
-                    continuation.yield(TranscriptionBatch(segments: [], progress: progress(at: boundary, duration: duration)))
-                    pending.removeFirst(stepSize)
-                    processedSamples += stepSize
-                    continue
-                }
-                let raw = try transcribeChunk(chunk, model: model, language: language, baseTime: baseTime)
-                try Task.checkCancellation()
-                let boundary = baseTime + Double(stepSize) / Double(samplesPerSecond)
-                let stable = raw.filter {
-                    let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
-                    return midpoint >= acceptedThrough - 0.05 && midpoint < boundary
-                }
-                acceptedThrough = boundary
-                let sentences = assembler.consume(stable)
-                if !sentences.isEmpty { allSegments.append(contentsOf: sentences); try? TranscriptCache.save(allSegments, episodeID: episode.id) }
-                continuation.yield(TranscriptionBatch(segments: sentences, progress: progress(at: boundary, duration: duration)))
-                pending.removeFirst(stepSize)
-                processedSamples += stepSize
-            }
+            try pcmBuffer.append(samples(from: sampleBuffer))
         }
         guard reader.status == .completed else { throw reader.error ?? WhisperTranscriptionError.audioDecodeFailed }
-        if pending.count >= samplesPerSecond {
-            let baseTime = resumeTime + Double(processedSamples) / Double(samplesPerSecond)
-            let raw = try transcribeChunk(pending, model: model, language: language, baseTime: baseTime)
+
+        let mappedPCM = try pcmBuffer.mappedData()
+        let speechRanges = (try? vad.speechRanges(in: mappedPCM, sampleCount: pcmBuffer.sampleCount,
+                                                  sampleRate: samplesPerSecond,
+                                                  maximumDuration: preferences.maximumSegmentDuration))
+            ?? [0..<pcmBuffer.sampleCount]
+        guard !speechRanges.isEmpty else { throw WhisperTranscriptionError.transcriptionFailed }
+        for range in speechRanges {
             try Task.checkCancellation()
-            let remaining = raw.filter {
-                let midpoint = ($0.start + ($0.end ?? $0.start)) / 2
-                return midpoint >= acceptedThrough - 0.05
+            let chunk = mappedPCM.floatSamples(in: range)
+            let baseTime = resumeTime + Double(range.lowerBound) / Double(samplesPerSecond)
+            let raw = try transcribeChunk(chunk, model: model, language: language, baseTime: baseTime)
+            let sentences = assembler.consume(raw)
+            if !sentences.isEmpty {
+                allSegments.append(contentsOf: sentences)
+                try? TranscriptCache.save(allSegments, episodeID: episode.id)
             }
-            var sentences = assembler.consume(remaining)
-            if let finalSentence = assembler.finish() { sentences.append(finalSentence) }
-            allSegments.append(contentsOf: sentences)
-            if !sentences.isEmpty { continuation.yield(TranscriptionBatch(segments: sentences, progress: 1)) }
+            let processedTime = resumeTime + Double(range.upperBound) / Double(samplesPerSecond)
+            continuation.yield(TranscriptionBatch(segments: sentences, progress: progress(at: processedTime, duration: duration)))
+        }
+        if let finalSentence = assembler.finish() {
+            allSegments.append(finalSentence)
+            continuation.yield(TranscriptionBatch(segments: [finalSentence], progress: 1))
         }
         guard !allSegments.isEmpty else { throw WhisperTranscriptionError.transcriptionFailed }
         try TranscriptCache.save(allSegments, episodeID: episode.id)
@@ -203,7 +213,8 @@ actor WhisperTranscriber {
     private func runWhisper(_ samples: [Float], context: OpaquePointer, language: String) -> Int32 {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         params.print_realtime = false; params.print_progress = false; params.print_timestamps = false; params.print_special = false
-        params.translate = false
+        params.translate = TranscriptionPreferences.current.translateToEnglish
+        params.token_timestamps = TranscriptionPreferences.current.wordTimestamps
         params.n_threads = Int32(max(1, min(4, ProcessInfo.processInfo.activeProcessorCount)))
         params.no_context = false; params.single_segment = false
         return language.withCString { code in
@@ -228,6 +239,46 @@ actor WhisperTranscriber {
     }
 }
 
+private final class DiskPCMBuffer {
+    private let url: URL
+    private let handle: FileHandle
+    private(set) var sampleCount = 0
+
+    init() throws {
+        let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("TranscriptionPCM", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        url = folder.appendingPathComponent(UUID().uuidString).appendingPathExtension("f32")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        handle = try FileHandle(forWritingTo: url)
+    }
+
+    func append(_ samples: [Float]) throws {
+        guard !samples.isEmpty else { return }
+        let data = samples.withUnsafeBytes { Data($0) }
+        try handle.write(contentsOf: data)
+        sampleCount += samples.count
+    }
+
+    func mappedData() throws -> Data {
+        try handle.synchronize()
+        try handle.close()
+        return try Data(contentsOf: url, options: .mappedIfSafe)
+    }
+
+    func remove() { try? FileManager.default.removeItem(at: url) }
+}
+
+private extension Data {
+    func floatSamples(in range: Range<Int>) -> [Float] {
+        guard !range.isEmpty else { return [] }
+        return withUnsafeBytes { raw in
+            let values = raw.bindMemory(to: Float.self)
+            return Array(values[range])
+        }
+    }
+}
+
 private final class SileroVAD {
     private let model: MLModel?
     private var hidden: MLMultiArray?
@@ -245,39 +296,116 @@ private final class SileroVAD {
         cell = try? MLMultiArray(shape: [1, 128], dataType: .float32)
     }
 
-    func containsSpeech(in samples: [Float]) throws -> Bool {
-        guard let model, var hidden, var cell else { return true }
+    func speechRanges(in samples: Data, sampleCount: Int, sampleRate: Int, maximumDuration: Double) throws -> [Range<Int>] {
+        resetState()
+        guard model != nil else { return [0..<sampleCount] }
         let frameSize = 4_160
-        var speechFrames = 0
-        var testedFrames = 0
+        var probabilities: [Double] = []
         var offset = 0
-        while offset < samples.count {
-            let audio = try MLMultiArray(shape: [1, NSNumber(value: frameSize)], dataType: .float32)
-            let count = min(frameSize, samples.count - offset)
-            for index in 0..<frameSize { audio[index] = NSNumber(value: index < count ? samples[offset + index] : 0) }
-            let input = try MLDictionaryFeatureProvider(dictionary: [
-                "audio_input": MLFeatureValue(multiArray: audio),
-                "hidden_state": MLFeatureValue(multiArray: hidden),
-                "cell_state": MLFeatureValue(multiArray: cell)
-            ])
-            let output = try model.prediction(from: input)
-            if let probability = output.featureValue(for: "vad_output")?.multiArrayValue?[0].doubleValue,
-               probability >= 0.5 { speechFrames += 1 }
-            if let next = output.featureValue(for: "new_hidden_state")?.multiArrayValue { hidden = next }
-            if let next = output.featureValue(for: "new_cell_state")?.multiArrayValue { cell = next }
-            testedFrames += 1
-            if speechFrames >= 2 { self.hidden = hidden; self.cell = cell; return true }
+        while offset < sampleCount {
+            probabilities.append(try probability(for: samples, sampleCount: sampleCount, offset: offset, frameSize: frameSize))
             offset += frameSize
         }
+
+        let startThreshold = 0.55
+        let endThreshold = 0.35
+        let minSpeechFrames = 2
+        let minSilenceFrames = 2
+        let paddingFrames = 1
+        var rawRanges: [Range<Int>] = []
+        var startFrame: Int?
+        var speechRun = 0
+        var silenceRun = 0
+
+        for index in probabilities.indices {
+            let probability = probabilities[index]
+            if startFrame == nil {
+                speechRun = probability >= startThreshold ? speechRun + 1 : 0
+                if speechRun >= minSpeechFrames { startFrame = max(0, index - speechRun + 1 - paddingFrames); silenceRun = 0 }
+            } else {
+                silenceRun = probability <= endThreshold ? silenceRun + 1 : 0
+                if silenceRun >= minSilenceFrames, let start = startFrame {
+                    let end = min(probabilities.count, index - silenceRun + 1 + paddingFrames)
+                    if end > start { rawRanges.append(start..<end) }
+                    startFrame = nil
+                    speechRun = 0
+                    silenceRun = 0
+                }
+            }
+        }
+        if let start = startFrame { rawRanges.append(start..<probabilities.count) }
+
+        let merged = merge(rawRanges, maximumGapFrames: 2)
+        let maximumFrames = max(46, Int(maximumDuration * Double(sampleRate) / Double(frameSize)))
+        let split = merged.flatMap { splitRange($0, probabilities: probabilities, maximumFrames: maximumFrames, preferredSearchFrames: 32) }
+        return split.compactMap { frameRange in
+            let lower = min(sampleCount, frameRange.lowerBound * frameSize)
+            let upper = min(sampleCount, frameRange.upperBound * frameSize)
+            guard upper - lower >= sampleRate / 4 else { return nil }
+            return lower..<upper
+        }
+    }
+
+    private func probability(for samples: Data, sampleCount: Int, offset: Int, frameSize: Int) throws -> Double {
+        guard let model, var hidden, var cell else { return 1 }
+        let audio = try MLMultiArray(shape: [1, NSNumber(value: frameSize)], dataType: .float32)
+        let count = min(frameSize, sampleCount - offset)
+        samples.withUnsafeBytes { raw in
+            let values = raw.bindMemory(to: Float.self)
+            for index in 0..<frameSize { audio[index] = NSNumber(value: index < count ? values[offset + index] : 0) }
+        }
+        let input = try MLDictionaryFeatureProvider(dictionary: [
+            "audio_input": MLFeatureValue(multiArray: audio),
+            "hidden_state": MLFeatureValue(multiArray: hidden),
+            "cell_state": MLFeatureValue(multiArray: cell)
+        ])
+        let output = try model.prediction(from: input)
+        if let next = output.featureValue(for: "new_hidden_state")?.multiArrayValue { hidden = next }
+        if let next = output.featureValue(for: "new_cell_state")?.multiArrayValue { cell = next }
         self.hidden = hidden
         self.cell = cell
-        return testedFrames > 0 && Double(speechFrames) / Double(testedFrames) >= 0.08
+        return output.featureValue(for: "vad_output")?.multiArrayValue?[0].doubleValue ?? 0
+    }
+
+    private func resetState() {
+        hidden = try? MLMultiArray(shape: [1, 128], dataType: .float32)
+        cell = try? MLMultiArray(shape: [1, 128], dataType: .float32)
+    }
+
+    private func merge(_ ranges: [Range<Int>], maximumGapFrames: Int) -> [Range<Int>] {
+        var result: [Range<Int>] = []
+        for range in ranges {
+            if let last = result.last, range.lowerBound - last.upperBound <= maximumGapFrames {
+                result[result.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                result.append(range)
+            }
+        }
+        return result
+    }
+
+    private func splitRange(_ range: Range<Int>, probabilities: [Double], maximumFrames: Int, preferredSearchFrames: Int) -> [Range<Int>] {
+        guard range.count > maximumFrames else { return [range] }
+        var result: [Range<Int>] = []
+        var start = range.lowerBound
+        while range.upperBound - start > maximumFrames {
+            let hardEnd = start + maximumFrames
+            let searchStart = max(start + maximumFrames - preferredSearchFrames, start + 1)
+            let split = (searchStart..<hardEnd).min { probabilities[$0] < probabilities[$1] } ?? hardEnd
+            result.append(start..<max(start + 1, split))
+            start = max(start + 1, split)
+        }
+        if start < range.upperBound { result.append(start..<range.upperBound) }
+        return result
     }
 }
 
 private struct SentenceAssembler {
     private var pending: TranscriptSegment?
     private let terminalPattern = #"[.!?。！？…][\"'”’)]*$"#
+    private let preferences: TranscriptionPreferences
+
+    init(preferences: TranscriptionPreferences) { self.preferences = preferences }
 
     mutating func consume(_ fragments: [TranscriptSegment]) -> [TranscriptSegment] {
         var completed: [TranscriptSegment] = []
@@ -285,7 +413,11 @@ private struct SentenceAssembler {
             guard !fragment.text.isEmpty else { continue }
             if let current = pending {
                 let gap = fragment.start - (current.end ?? current.start)
-                if isTerminal(current.text) || gap > 1.8 {
+                let duration = (current.end ?? current.start) - current.start
+                let commaBoundary = preferences.splitOnComma && isCommaTerminal(current.text)
+                let chineseBoundary = chineseCharacterCount(current.text) >= preferences.chineseSegmentCount
+                if (duration >= preferences.minimumSegmentDuration && (isTerminal(current.text) || commaBoundary || chineseBoundary)) ||
+                    gap > 1.8 || duration >= preferences.maximumSegmentDuration {
                     completed.append(current)
                     pending = fragment
                 } else {
@@ -315,6 +447,16 @@ private struct SentenceAssembler {
         text.range(of: terminalPattern, options: .regularExpression) != nil
     }
 
+    private func isCommaTerminal(_ text: String) -> Bool {
+        text.range(of: #"[,，;；:：][\"'”’)]*$"#, options: .regularExpression) != nil
+    }
+
+    private func chineseCharacterCount(_ text: String) -> Int {
+        text.unicodeScalars.reduce(0) { count, scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value)) ? count + 1 : count
+        }
+    }
+
     private func needsSpace(after left: String, before right: String) -> Bool {
         guard let first = right.first, let last = left.last else { return false }
         if ",.;:!?。！？…，；：)]}”’".contains(first) { return false }
@@ -324,9 +466,10 @@ private struct SentenceAssembler {
 }
 
 private struct WhisperModelStore {
-    func modelURL(for quality: WhisperQuality) async throws -> URL {
+    func modelURL(for quality: WhisperQuality, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         let name = (quality.filename as NSString).deletingPathExtension
         if let bundled = Bundle.main.url(forResource: name, withExtension: "bin") {
+            progress(1)
             return bundled
         }
         let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -335,16 +478,125 @@ private struct WhisperModelStore {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let destination = folder.appendingPathComponent(quality.filename)
         let minimumSize = quality == .balanced || quality == .balancedEnglish ? 150_000_000 : 50_000_000
-        if let size = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > minimumSize {
-            return destination
+        let modelReady = ((try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > minimumSize
+        if !modelReady {
+            let data = try await ModelDataDownloader.download(sources(for: quality.filename)) { progress($0 * 0.72) }
+            guard data.count > minimumSize else { throw WhisperTranscriptionError.modelDownloadFailed }
+            do { try data.write(to: destination, options: .atomic) }
+            catch { throw WhisperTranscriptionError.modelDownloadFailed }
         }
-        let source = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(quality.filename)?download=true")!
-        let (temporary, response) = try await URLSession.shared.download(from: source)
-        try validate(response)
-        try? FileManager.default.removeItem(at: destination)
-        do { try FileManager.default.moveItem(at: temporary, to: destination) }
-        catch { throw WhisperTranscriptionError.modelDownloadFailed }
+        try await ensureEncoder(for: quality, folder: folder) { encoderProgress in
+            progress(0.72 + encoderProgress * 0.28)
+        }
+        progress(1)
         return destination
+    }
+
+    private func ensureEncoder(for quality: WhisperQuality, folder: URL,
+                               progress: @escaping @Sendable (Double) -> Void) async throws {
+        guard let archiveFilename = quality.encoderArchiveFilename else { progress(1); return }
+        let destination = folder.appendingPathComponent(quality.installedEncoderFilename, isDirectory: true)
+        let weights = destination.appendingPathComponent("weights/weight.bin")
+        if FileManager.default.fileExists(atPath: weights.path) { progress(1); return }
+
+        let data = try await ModelDataDownloader.download(sources(for: archiveFilename), progress: progress)
+        guard data.count > 1_000_000 else { throw WhisperTranscriptionError.modelDownloadFailed }
+        let archive = folder.appendingPathComponent(archiveFilename)
+        try data.write(to: archive, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let extracted = folder.appendingPathComponent((archiveFilename as NSString).deletingPathExtension, isDirectory: true)
+        try? FileManager.default.removeItem(at: extracted)
+        try FileManager.default.unzipItem(at: archive, to: folder)
+        guard FileManager.default.fileExists(atPath: extracted.path) else { throw WhisperTranscriptionError.modelDownloadFailed }
+        try? FileManager.default.removeItem(at: destination)
+        if extracted != destination { try FileManager.default.moveItem(at: extracted, to: destination) }
+        guard FileManager.default.fileExists(atPath: weights.path) else { throw WhisperTranscriptionError.modelDownloadFailed }
+    }
+
+    private func sources(for filename: String) -> [URL] {
+        [
+            URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(filename)?download=true")!,
+            URL(string: "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/\(filename)?download=true")!
+        ]
+    }
+}
+
+enum WhisperModelCacheManager {
+    static func cacheSize() -> Int64 {
+        let folder = cacheFolder()
+        guard let enumerator = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            if values?.isRegularFile == true { total += Int64(values?.fileSize ?? 0) }
+        }
+        return total
+    }
+
+    static func removeDownloadedModels() {
+        try? FileManager.default.removeItem(at: cacheFolder())
+    }
+
+    private static func cacheFolder() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Whisper", isDirectory: true)
+    }
+}
+
+private final class ModelDataDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private var data = Data()
+    private var expectedLength: Int64 = 0
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var progress: (@Sendable (Double) -> Void)?
+    private var session: URLSession?
+
+    static func download(_ urls: [URL], progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+        var lastError: Error = URLError(.cannotConnectToHost)
+        for url in urls {
+            do { return try await download(url, progress: progress) }
+            catch { lastError = error }
+        }
+        throw lastError
+    }
+
+    private static func download(_ url: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+        let delegate = ModelDataDownloader()
+        delegate.progress = progress
+        return try await withCheckedThrowingContinuation { continuation in
+            delegate.continuation = continuation
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = 45
+            configuration.timeoutIntervalForResource = 1_800
+            let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+            delegate.session = session
+            session.dataTask(with: url).resume()
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            continuation?.resume(throwing: URLError(.badServerResponse))
+            continuation = nil
+            completionHandler(.cancel)
+            return
+        }
+        expectedLength = response.expectedContentLength
+        if expectedLength > 0 { data.reserveCapacity(Int(expectedLength)) }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        self.data.append(data)
+        if expectedLength > 0 { progress?(min(1, Double(self.data.count) / Double(expectedLength))) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer { self.session?.finishTasksAndInvalidate(); self.session = nil }
+        guard let continuation else { return }
+        self.continuation = nil
+        if let error { continuation.resume(throwing: error) }
+        else { progress?(1); continuation.resume(returning: data) }
     }
 }
 

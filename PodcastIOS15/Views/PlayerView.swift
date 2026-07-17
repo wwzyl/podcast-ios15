@@ -45,6 +45,9 @@ private struct PlayerContentView: View {
     @State private var bookmarkedTexts: Set<String> = []
     @State private var currentSentenceFrame: CGRect?
     @State private var transcriptViewportHeight: CGFloat = 0
+    @State private var resumePlaybackAfterLookup = false
+    @State private var sharePayload: SharePayload?
+    @State private var editRequest: TranscriptEditRequest?
 
     private var currentIndex: Int? {
         guard !segments.isEmpty else { return nil }
@@ -79,12 +82,12 @@ private struct PlayerContentView: View {
                                                 seek: { player.seek(to: segment.start) },
                                                 translate: { translate(index) },
                                                 learn: { selected in
-                                                    lookupRequest = WordLookupRequest(segment: segment,
-                                                                                      selectedText: selected,
-                                                                                      previous: index > 0 ? segments[index - 1].text : nil,
-                                                                                      next: index + 1 < segments.count ? segments[index + 1].text : nil)
+                                                     beginLookup(segment: segment, selected: selected,
+                                                                 previous: index > 0 ? segments[index - 1].text : nil,
+                                                                 next: index + 1 < segments.count ? segments[index + 1].text : nil)
                                                  },
                                                  favorite: { saveSentence(segment) },
+                                                 edit: { editRequest = TranscriptEditRequest(index: index, segment: segment) },
                                                  analyze: {
                                                      analysisRequest = AIAnalysisRequest(segment: segment,
                                                                                          previous: index > 0 ? segments[index - 1].text : nil,
@@ -129,6 +132,15 @@ private struct PlayerContentView: View {
                             }
                         }
                         .onChange(of: currentIndex) { index in
+                            if store.lockScreenShowsTranscript, let index, segments.indices.contains(index) {
+                                player.updateNowPlayingSubtitle(segments[index].text)
+                            } else if !store.lockScreenShowsTranscript {
+                                player.updateNowPlayingSubtitle(nil)
+                            }
+                            if store.autoTranslateCurrentSentence, let index, segments.indices.contains(index),
+                               (segments[index].translation ?? "").isEmpty {
+                                translate(index)
+                            }
                             guard followPlayback, let index, segments.indices.contains(index) else { return }
                             withAnimation { proxy.scrollTo(segments[index].id, anchor: .center) }
                         }
@@ -146,6 +158,7 @@ private struct PlayerContentView: View {
                         Button("整体延后 0.5 秒") { shiftTranscript(by: 0.5) }
                     }
                     Button { translateAll() } label: { Label("翻译全文", systemImage: "character.bubble") }.disabled(translatingAll || segments.isEmpty)
+                    Button { exportTranscript() } label: { Label("导出文本", systemImage: "square.and.arrow.up") }.disabled(segments.isEmpty)
                     Menu("从头重新转写") {
                         Button("使用 Scribe v2") { transcribeAudio(using: .scribe) }
                         Menu("使用 Whisper") {
@@ -154,7 +167,13 @@ private struct PlayerContentView: View {
                             Button("英语极速") { transcribeAudio(using: .whisperFastEnglish) }
                             Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
                         }
-                        Button("使用 Apple 系统识别") { transcribeAudio(using: .systemSpeech) }
+                        Menu("使用 Apple 系统识别") {
+                            Button("自动语言") { transcribeAudio(using: .systemSpeechAuto) }
+                            Button("英语") { transcribeAudio(using: .systemSpeechEnglish) }
+                            Button("简体中文") { transcribeAudio(using: .systemSpeechChinese) }
+                            Button("日语") { transcribeAudio(using: .systemSpeechJapanese) }
+                            Button("韩语") { transcribeAudio(using: .systemSpeechKorean) }
+                        }
                     }.disabled(transcription.state(for: episode).isRunning)
                     Menu("从当前位置重新转写") {
                         Button("使用 Scribe v2") { retranscribeFromCurrent(using: .scribe) }
@@ -164,7 +183,6 @@ private struct PlayerContentView: View {
                             Button("英语极速") { retranscribeFromCurrent(using: .whisperFastEnglish) }
                             Button("英语均衡（更准确）") { retranscribeFromCurrent(using: .whisperBalancedEnglish) }
                         }
-                        Button("使用 Apple 系统识别") { retranscribeFromCurrent(using: .systemSpeech) }
                     }.disabled(transcription.state(for: episode).isRunning)
                     Divider()
                     Button { player.playPrevious() } label: { Label("播放上一集", systemImage: "backward.end") }
@@ -179,11 +197,23 @@ private struct PlayerContentView: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { FullPlayerControls() }
         .searchable(text: $searchText, prompt: "搜索文稿")
-        .sheet(item: $lookupRequest) { request in
+        .sheet(item: $lookupRequest, onDismiss: finishLookup) { request in
             WordLearningView(episode: episode, request: request)
         }
         .sheet(item: $analysisRequest) { request in
             AIAnalysisView(request: request)
+        }
+        .sheet(item: $sharePayload) { payload in
+            ActivityView(items: [payload.text])
+        }
+        .sheet(item: $editRequest) { request in
+            TranscriptEditView(request: request) { text, translation in
+                guard segments.indices.contains(request.index) else { return }
+                let old = segments[request.index]
+                segments[request.index] = TranscriptSegment(id: old.id, start: old.start, end: old.end,
+                                                             text: text, translation: translation.isEmpty ? nil : translation)
+                try? TranscriptCache.save(segments, episodeID: episode.id)
+            }
         }
         .alert("提示", isPresented: Binding(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) { Button("好") {} } message: { Text(errorText ?? "") }
         .onAppear {
@@ -210,7 +240,7 @@ private struct PlayerContentView: View {
             if transcription.state(for: episode).isRunning {
                 VStack(spacing: 8) {
                     ProgressView(value: transcription.state(for: episode).progress)
-                    Text("\(transcription.state(for: episode).engine.title) 正在转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
+                    Text(transcription.state(for: episode).statusText ?? "\(transcription.state(for: episode).engine.title) 正在转录 \(Int(transcription.state(for: episode).progress * 100))% · 完整句生成后立即显示")
                         .font(.caption).foregroundColor(.secondary)
                 }
             } else if transcription.state(for: episode).errorMessage != nil {
@@ -226,8 +256,13 @@ private struct PlayerContentView: View {
                         Button("英语均衡（更准确）") { transcribeAudio(using: .whisperBalancedEnglish) }
                     }
                     .buttonStyle(.bordered)
-                    Button("Apple 系统识别") { transcribeAudio(using: .systemSpeech) }
-                        .buttonStyle(.bordered)
+                    Menu("Apple 系统识别") {
+                        Button("自动语言") { transcribeAudio(using: .systemSpeechAuto) }
+                        Button("英语") { transcribeAudio(using: .systemSpeechEnglish) }
+                        Button("简体中文") { transcribeAudio(using: .systemSpeechChinese) }
+                        Button("日语") { transcribeAudio(using: .systemSpeechJapanese) }
+                        Button("韩语") { transcribeAudio(using: .systemSpeechKorean) }
+                    }.buttonStyle(.bordered)
                 }
             }
         }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -256,7 +291,7 @@ private struct PlayerContentView: View {
         case .ready:
             if transcription.state(for: episode).isRunning {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("\(transcription.state(for: episode).engine.title) 正在转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
+                    Text(transcription.state(for: episode).statusText ?? "\(transcription.state(for: episode).engine.title) 正在转录 \(Int(transcription.state(for: episode).progress * 100))%").font(.caption)
                     ProgressView(value: transcription.state(for: episode).progress)
                 }.padding(.horizontal, 16).padding(.vertical, 8).background(AppTheme.purple.opacity(0.09))
             } else if let message = transcription.state(for: episode).errorMessage {
@@ -272,7 +307,13 @@ private struct PlayerContentView: View {
                             Button("英语极速") { retryTranscription(using: .whisperFastEnglish) }
                             Button("英语均衡（更准确）") { retryTranscription(using: .whisperBalancedEnglish) }
                         }
-                        Button("Apple 系统识别") { retryTranscription(using: .systemSpeech) }
+                        Menu("Apple 系统识别") {
+                            Button("自动语言") { retryTranscription(using: .systemSpeechAuto) }
+                            Button("英语") { retryTranscription(using: .systemSpeechEnglish) }
+                            Button("简体中文") { retryTranscription(using: .systemSpeechChinese) }
+                            Button("日语") { retryTranscription(using: .systemSpeechJapanese) }
+                            Button("韩语") { retryTranscription(using: .systemSpeechKorean) }
+                        }
                     }
                 }
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -353,6 +394,41 @@ private struct PlayerContentView: View {
         TranscriptBookmarkStore.save(bookmarkedTexts, episodeID: episode.id)
     }
 
+    private func beginLookup(segment: TranscriptSegment, selected: String, previous: String?, next: String?) {
+        let value = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        if store.lookupAutoCopy, !value.isEmpty { UIPasteboard.general.string = value }
+        if store.lookupPausePlayback, player.isPlaying {
+            resumePlaybackAfterLookup = store.lookupResumePlayback
+            player.toggle()
+        } else {
+            resumePlaybackAfterLookup = false
+        }
+        if store.lookupOpenEudicDirectly, !value.isEmpty {
+            EudicService.open(value)
+            finishLookup()
+            return
+        }
+        lookupRequest = WordLookupRequest(segment: segment, selectedText: value, previous: previous, next: next)
+    }
+
+    private func finishLookup() {
+        if resumePlaybackAfterLookup, !player.isPlaying { player.toggle() }
+        resumePlaybackAfterLookup = false
+    }
+
+    private func exportTranscript() {
+        let text = segments.map { segment -> String in
+            var lines: [String] = []
+            if store.exportIncludeTimestamps { lines.append("[\(segment.start.clockString)]") }
+            lines.append(segment.text)
+            if store.exportIncludeTranslations, let translation = segment.translation, !translation.isEmpty {
+                lines.append(translation)
+            }
+            return lines.joined(separator: " ")
+        }.joined(separator: "\n\n")
+        sharePayload = SharePayload(text: text)
+    }
+
     private func shiftTranscript(by offset: TimeInterval) {
         guard !segments.isEmpty, !transcription.state(for: episode).isRunning else { return }
         segments = segments.map {
@@ -428,6 +504,48 @@ private struct AIAnalysisRequest: Identifiable {
     let next: String?
 }
 
+private struct TranscriptEditRequest: Identifiable {
+    let id = UUID()
+    let index: Int
+    let segment: TranscriptSegment
+}
+
+private struct TranscriptEditView: View {
+    @Environment(\.dismiss) private var dismiss
+    let request: TranscriptEditRequest
+    let save: (String, String) -> Void
+    @State private var text: String
+    @State private var translation: String
+
+    init(request: TranscriptEditRequest, save: @escaping (String, String) -> Void) {
+        self.request = request
+        self.save = save
+        _text = State(initialValue: request.segment.text)
+        _translation = State(initialValue: request.segment.translation ?? "")
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("文本") { TextEditor(text: $text).frame(minHeight: 140) }
+                Section("翻译") { TextEditor(text: $translation).frame(minHeight: 120) }
+            }
+            .navigationTitle("编辑段落").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !value.isEmpty else { return }
+                        save(value, translation.trimmingCharacters(in: .whitespacesAndNewlines))
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct AIAnalysisView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: LibraryStore
@@ -468,16 +586,18 @@ private struct AIAnalysisView: View {
         errorText = nil
         Task {
             do {
-                result = try await AIAnalysisService().analyze(
+                let stream = AIAnalysisService().analyzeStream(
                     kind: .sentence,
                     previous: request.previous,
                     sentence: request.segment.text,
                     next: request.next,
-                    outputLanguage: store.targetLanguage,
+                    outputLanguage: store.aiOutputLanguage,
+                    style: store.resolvedAIExplanationStyle,
                     configuration: ContextDefinitionConfiguration(enabled: true,
                                                                   baseURL: store.contextGPTBaseURL,
                                                                   apiKey: store.contextGPTAPIKey,
                                                                   model: store.contextGPTModel))
+                for try await partial in stream { result = partial }
             } catch { errorText = "分析失败：\(error.localizedDescription)" }
             loading = false
         }
@@ -491,6 +611,7 @@ private struct SentenceRow: View {
     let translate: () -> Void
     let learn: (String) -> Void
     let favorite: () -> Void
+    let edit: () -> Void
     let analyze: () -> Void
     let bookmarked: Bool
     let toggleBookmark: () -> Void
@@ -503,6 +624,7 @@ private struct SentenceRow: View {
                 Menu {
                     Button(action: translate) { Label("翻译这句话", systemImage: "character.bubble") }
                     Button(action: analyze) { Label("AI 分析", systemImage: "sparkles") }
+                    Button(action: edit) { Label("编辑文本和翻译", systemImage: "pencil") }
                     Button { learn("") } label: { Label("查词并加入生词", systemImage: "text.magnifyingglass") }
                     Button(action: favorite) { Label("收藏句子", systemImage: "bookmark") }
                     Button(action: toggleBookmark) { Label(bookmarked ? "移除书签" : "添加书签", systemImage: bookmarked ? "bookmark.slash" : "bookmark.fill") }
@@ -703,7 +825,8 @@ private struct WordLearningView: View {
             let configuration = ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
                                                                baseURL: store.contextGPTBaseURL,
                                                                apiKey: store.contextGPTAPIKey,
-                                                               model: store.contextGPTModel)
+                                                               model: store.contextGPTModel,
+                                                               style: store.resolvedAIExplanationStyle)
             var translatedWord: String?
             do {
                 translatedWord = try await ContextDefinitionService().meaning(
@@ -737,16 +860,18 @@ private struct WordLearningView: View {
         errorText = nil
         Task {
             do {
-                translation = try await AIAnalysisService().analyze(
+                let stream = AIAnalysisService().analyzeStream(
                     kind: .expression(selected),
                     previous: request.previous,
                     sentence: request.segment.text,
                     next: request.next,
-                    outputLanguage: store.targetLanguage,
+                    outputLanguage: store.aiOutputLanguage,
+                    style: store.resolvedAIExplanationStyle,
                     configuration: ContextDefinitionConfiguration(enabled: true,
                                                                   baseURL: store.contextGPTBaseURL,
                                                                   apiKey: store.contextGPTAPIKey,
                                                                   model: store.contextGPTModel))
+                for try await partial in stream { translation = partial }
                 contextMeaningSource = "AI 解释"
             } catch { errorText = "AI 解释失败：\(error.localizedDescription)" }
             aiExplaining = false
@@ -781,7 +906,8 @@ private struct WordLearningView: View {
                         configuration: ContextDefinitionConfiguration(enabled: store.contextGPTEnabled,
                                                                       baseURL: store.contextGPTBaseURL,
                                                                       apiKey: store.contextGPTAPIKey,
-                                                                      model: store.contextGPTModel))) ?? ""
+                                                                      model: store.contextGPTModel,
+                                                                      style: store.resolvedAIExplanationStyle))) ?? ""
                 }
             }
             if savedFrequency == nil { savedFrequency = WordFrequencyService().lookup(selected) }
@@ -808,13 +934,7 @@ private struct WordLearningView: View {
     }
 
     private func openEudic() {
-        let value = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        let encoded = value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
-        guard let appURL = URL(string: "eudic://dict/\(encoded)") else { return }
-        UIApplication.shared.open(appURL, options: [:]) { opened in
-            guard !opened, let webURL = URL(string: "https://dict.eudic.net/dicts/en/\(encoded)") else { return }
-            UIApplication.shared.open(webURL)
-        }
+        EudicService.open(word)
     }
 }
 
@@ -822,6 +942,19 @@ private struct SystemDictionaryView: UIViewControllerRepresentable {
     let term: String
     func makeUIViewController(context: Context) -> UIReferenceLibraryViewController { UIReferenceLibraryViewController(term: term) }
     func updateUIViewController(_ uiViewController: UIReferenceLibraryViewController, context: Context) {}
+}
+
+private struct SharePayload: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 private struct SelectableSentenceView: UIViewRepresentable {
